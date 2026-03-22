@@ -1,4 +1,4 @@
-# NLPCC2026-Shared-Task-4: Capability Evaluation of LLM-based Investment Advisor Agents for Asset Allocation in the Chinese Market
+# NLPCC2026-Shared-Task-4: LLM-based Investment Advisor Agents for Asset Allocation in the Chinese Market
 > ⚠️ **IMPORTANT DISCLAIMER**
 > 
 > **All data, competition materials, and code related to this task are intended for academic research purposes only and do not constitute any form of investment advice.**
