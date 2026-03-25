@@ -214,6 +214,13 @@
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 16px;
+            margin-bottom: 16px;
+        }
+
+        .links-secondary {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
             margin-bottom: 35px;
         }
 
@@ -250,6 +257,28 @@
             background: #1d4ed8;
             transform: translateY(-2px);
             box-shadow: 0 6px 20px rgba(37, 99, 235, 0.4);
+        }
+
+        .btn-participate {
+            background: #065f46;
+            color: white;
+        }
+
+        .btn-participate:hover {
+            background: #064e3b;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(6, 95, 70, 0.4);
+        }
+
+        .btn-dates {
+            background: #7c3aed;
+            color: white;
+        }
+
+        .btn-dates:hover {
+            background: #6d28d9;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(124, 58, 237, 0.4);
         }
 
         .organizers {
@@ -351,6 +380,9 @@
             .links {
                 grid-template-columns: 1fr;
             }
+            .links-secondary {
+                grid-template-columns: 1fr;
+            }
             .metrics {
                 flex-direction: column;
             }
@@ -450,6 +482,15 @@
             </div>
 
             <div class="links">
+                <a href="http://tcci.ccf.org.cn/conference/2026/shared-tasks/#participate" target="_blank" class="btn btn-participate">
+                    <span>📝</span> How to Participate
+                </a>
+                <a href="http://tcci.ccf.org.cn/conference/2026/shared-tasks/#dates" target="_blank" class="btn btn-dates">
+                    <span>📅</span> Important Dates
+                </a>
+            </div>
+
+            <div class="links-secondary">
                 <a href="https://github.com/splash-li/NLPCC2026-Shared-Task-4/" target="_blank" class="btn btn-github">
                     <span>📦</span> GitHub Repository
                 </a>
