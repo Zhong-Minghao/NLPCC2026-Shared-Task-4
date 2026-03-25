@@ -19,7 +19,7 @@ Performance will be ranked primarily by Sharpe Ratio, alongside cumulative retur
 
 
 ## Awards & Conference Support
-* NLPCC & CCF-NLP Certification: The top 3 participating teams of each track will be certified by NLPCC and CCF-NLP.
+* NLPCC & CCF-NLP Certification: The top 1 participating team of each track will be certified by NLPCC and CCF-NLP.
 * Workshop Registration Support: One member from each of the top 3 teams of each track who attends the conference in person will receive support for the workshop registration fee.
 
 ## Organizer: 
