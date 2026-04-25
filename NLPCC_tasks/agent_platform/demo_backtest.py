@@ -62,7 +62,7 @@ def parse_args():
         description="Run one demo backtest for the competition starter kit."
     )
     parser.add_argument("--track", choices=["macro", "sector"], default="sector")
-    parser.add_argument("--model", default="gpt-5")
+    parser.add_argument("--model", default="kimi-k2.6")
     parser.add_argument("--start-date", default="2025-01-02")
     parser.add_argument("--end-date", default="2025-01-31")
     parser.add_argument("--initial-capital", type=float, default=100000)

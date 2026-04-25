@@ -9,12 +9,12 @@ import pandas as pd
 
 from logs import server_logger as logger
 
-try:
-    from dataset.price_data.price_normalizer import load_standardized_price_csv
-except ModuleNotFoundError:
-    from AgentFundsArena.dataset.price_data.price_normalizer import (
-        load_standardized_price_csv,
-    )
+# try:
+from dataset.price_data.price_normalizer import load_standardized_price_csv
+# except ModuleNotFoundError:
+#     from AgentFundsArena.dataset.price_data.price_normalizer import (
+#         load_standardized_price_csv,
+#     )
 
 
 def _clean_nan_value(value):

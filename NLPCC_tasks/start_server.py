@@ -76,6 +76,10 @@ def start_server():
     """启动FastAPI服务器"""
     try:
         import uvicorn
+        import nest_asyncio  # 用于 Jupyter 环境
+
+        # 应用 nest_asyncio 以允许在 Jupyter 中运行
+        nest_asyncio.apply()
 
         print("\n" + "=" * 50)
         print("🚀 启动 LLM Agent Trading Arena 服务器")
