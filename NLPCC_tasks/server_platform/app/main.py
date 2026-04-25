@@ -10,7 +10,7 @@ from logs import server_logger as logger
 from .api import agents, backtest, funds, live, reporting
 from .core.backtest import backtest_sessions, load_historical_sessions
 from .core.data_loader import init_data_loader
-from reporting.fund_arena import warm_up_report_cache
+# from reporting.fund_arena import warm_up_report_cache
 
 # --- FastAPI App Initialization ---
 app = FastAPI(
@@ -25,15 +25,16 @@ app = FastAPI(
 _initialized = False
 _initialization_complete = False
 
+
 @app.on_event("startup")
 async def startup_event():
     """Handles application startup events."""
     global _initialized, _initialization_complete
-    
+
     if _initialized:
         logger.debug("Already initialized, skipping startup initialization")
         return
-    
+
     logger.info("Server platform is starting up...")
     try:
         from config import DATA_DIRS
@@ -41,23 +42,25 @@ async def startup_event():
         # Initialize data loader (only if not already initialized)
         init_data_loader(str(DATA_DIRS["PRICE_DATA"]), str(DATA_DIRS["NEWS_DATA"]))
         logger.info("DataLoader initialized successfully.")
-        
+
         # Load historical sessions (only once at startup)
         load_historical_sessions(force_reload=True)
         logger.info(f"Loaded {len(backtest_sessions)} backtest sessions")
-        
+
         # Mark as initialized
         _initialized = True
-        
-        warm_up_report_cache()
-        
+
+        # warm_up_report_cache()
+
         # Mark initialization as complete - server is now ready to accept requests
         _initialization_complete = True
-        
+
         logger.info("Server startup complete - all data loaded and cache warmed")
     except Exception as e:
         logger.critical(f"Failed to initialize: {e}", exc_info=True)
-        _initialization_complete = True  # Still mark as complete so server can serve (even if degraded)
+        _initialization_complete = (
+            True  # Still mark as complete so server can serve (even if degraded)
+        )
 
 
 @app.on_event("shutdown")
@@ -96,8 +99,7 @@ async def readiness_check():
     """
     if not _initialization_complete:
         return JSONResponse(
-            status_code=503,
-            content={"status": "initializing", "ready": False}
+            status_code=503, content={"status": "initializing", "ready": False}
         )
     return {"status": "ready", "ready": True}
 
@@ -129,5 +131,7 @@ if dist_dir.exists() and dist_dir.is_dir():
     app.mount("/ui", SPAStaticFiles(directory=dist_dir, html=True), name="ui")
     logger.info(f"Serving production frontend from: {dist_dir}")
 else:
-    logger.warning(f"Frontend 'dist' directory not found at: {dist_dir}. UI will not be available.")
+    logger.warning(
+        f"Frontend 'dist' directory not found at: {dist_dir}. UI will not be available."
+    )
     logger.warning("Please run 'npm run build' in the 'frontend' directory.")
