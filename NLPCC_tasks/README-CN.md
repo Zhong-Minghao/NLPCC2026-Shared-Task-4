@@ -301,3 +301,9 @@ NLPCC_tasks/
 ├── requirements.txt
 └── start_server.py
 ```
+
+
+## 文档索引补充
+
+- 根目录版本：`/AI_TRADING_FRAMEWORK_CN.md`
+- 子目录镜像：`/NLPCC_tasks/AI_TRADING_FRAMEWORK_CN.md`
