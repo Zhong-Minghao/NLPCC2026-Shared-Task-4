@@ -175,7 +175,7 @@ async def run_demo_backtest(args):
         if data.get("message") == "Backtest finished":
             break
 
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)    # 减慢访问速率
 
     final_results = client.get_backtest_results(session_id)
     output_path = build_output_path(args, session_id)

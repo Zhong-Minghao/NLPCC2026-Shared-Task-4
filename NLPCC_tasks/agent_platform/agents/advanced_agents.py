@@ -75,12 +75,15 @@ async def save_global_cache():
 class NewsProcessingAgent:
     """新闻处理Agent - 负责新闻摘要提取"""
 
-    def __init__(self):
+    def __init__(self, model_name="EFundGPT-pro"):
         self.llm = ChatOpenAI(
             base_url=os.getenv("OPENAI_API_BASE"),
             api_key=os.getenv("OPENAI_API_KEY"),
-            model="EFundGPT-pro",  # default to light-model
-            temperature=0.1,
+            model=model_name,
+            temperature=1,   # EFundGPT 原来是0.1
+            model_kwargs={   # kimi-k2.6允许json输出
+                "response_format": {"type": "json_object"}
+            }
         )
         load_global_cache()  # avoid duplicate requests to save tokens
 
@@ -231,7 +234,7 @@ class NewsProcessingAgent:
         }
 
     async def process_news_batch(
-        self, news_list: List[Dict], max_workers: int = 5
+        self, news_list: List[Dict], max_workers: int = 25    # kimi-k2.6限制3
     ) -> List[Dict]:
         """批量处理新闻摘要（并发）"""
         if not news_list:
@@ -265,7 +268,7 @@ class SentimentAnalysisAgent:
             base_url=os.getenv("OPENAI_API_BASE"),
             api_key=os.getenv("OPENAI_API_KEY"),
             model=model_name,
-            temperature=0.1,
+            temperature=1,   # EFundGPT 原来是0.1
         )
         self.parser = CustomJsonOutputParser()
 
@@ -337,11 +340,15 @@ class SentimentAnalysisAgent:
             for i in range(llm_retry):
                 try:
                     response = await asyncio.wait_for(
-                        self.llm.ainvoke(prompt), timeout=120
+                        self.llm.ainvoke(
+                            prompt,
+                            response_format={"type": "json_object"}  # kimi-k2.6直接支持json输出
+                        ), timeout=120
                     )
                     # logger.debug(f"analyze agent input: {prompt}")
                     # process response
-                    analysis = self.parser.parse(response.content)
+                    # analysis = self.parser.parse(response.content)
+                    analysis = json.loads(response.content)    # 保证是json对象，简化解析
                     logger.info(f"LLM analysis: {analysis}")
                     return analysis
                 except asyncio.TimeoutError:
@@ -374,7 +381,7 @@ class TradingStrategyAgent:
             base_url=os.getenv("OPENAI_API_BASE"),
             api_key=os.getenv("OPENAI_API_KEY"),
             model=model_name,
-            temperature=0.1,
+            temperature=1,   # EFundGPT 原来是0.1
         )
         self.parser = CustomJsonOutputParser()
         self.prompt_template = prompt_template
@@ -508,9 +515,13 @@ class AdvancedTradingAgent:
         agent_id: str,
         trading_prompt_template: str = None,
         decision_model_name="EFundGPT-max",
+        news_model_name=None,
     ):
         self.agent_id = agent_id
-        self.news_agent = NewsProcessingAgent()  # default to small model
+        # Use decision_model_name for news if news_model_name not specified
+        self.news_agent = NewsProcessingAgent(
+            model_name=news_model_name or decision_model_name
+        )
         self.sentiment_agent = SentimentAnalysisAgent(model_name=decision_model_name)
         self.trading_agent = TradingStrategyAgent(
             prompt_template=trading_prompt_template or BASELINE_TRADING_PROMPT,
@@ -698,6 +709,7 @@ def get_advanced_agent(
     agent_id: str = "advanced_agent",
     trading_prompt_template: str = None,
     decision_model_name="EFundGPT-max",
+    news_model_name=None,
 ) -> AdvancedTradingAgent:
     """获取高级Agent实例 (每次返回新实例以支持并发回测)"""
     # 在并发回测场景下，每个session需要独立的Agent实例来维护自己的history
@@ -705,4 +717,5 @@ def get_advanced_agent(
         agent_id,
         trading_prompt_template=trading_prompt_template,
         decision_model_name=decision_model_name,
+        news_model_name=news_model_name,
     )
