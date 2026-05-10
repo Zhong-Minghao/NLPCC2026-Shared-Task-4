@@ -123,7 +123,7 @@ class NewsProcessingAgent:
 
         try:
             prompt = f"""
-请将以下金融新闻提取为非常简短的摘要（1-2句话），只保留核心信息：
+请将以下金融新闻提取为非常简短的摘要（1-2句话），只保留核心信息，以json格式返回：
 
 **原始新闻**:
 时间：{news_item.get("THEDATE", "无日期")}

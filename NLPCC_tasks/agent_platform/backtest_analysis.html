@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>回测分析仪表盘 | NLPCC 2026</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#0d0f1a;color:#c9d1d9;font-family:'PingFang SC','Microsoft YaHei','SF Pro Text',sans-serif;font-size:13px;min-height:100vh}
+
+/* ── Upload ── */
+#upload-zone{padding:32px 24px;background:#0d0f1a}
+#drop-area{border:2px dashed #30363d;border-radius:10px;padding:40px;text-align:center;cursor:pointer;transition:border-color .2s,background .2s;background:#161b22}
+#drop-area:hover,#drop-area.dragover{border-color:#58a6ff;background:#0d1526}
+#drop-area .ico{font-size:36px;margin-bottom:10px}
+#drop-area .lbl{color:#8b949e;font-size:14px}
+#drop-area .lbl span{color:#58a6ff;text-decoration:underline}
+#file-input{display:none}
+
+/* ── Info bar ── */
+#info-bar{background:#161b22;border-bottom:1px solid #21262d;padding:10px 24px;display:flex;gap:28px;align-items:center;flex-wrap:wrap}
+.ii{display:flex;flex-direction:column;gap:2px}
+.ii-lbl{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:.6px}
+.ii-val{color:#e6edf3;font-weight:700;font-size:13px;font-family:'SF Mono',monospace}
+
+/* ── Tabs ── */
+#tab-nav{background:#161b22;border-bottom:1px solid #21262d;padding:0 24px;display:flex}
+.tab-btn{background:none;border:none;color:#8b949e;padding:11px 17px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent;transition:color .2s,border-color .2s;white-space:nowrap}
+.tab-btn:hover{color:#c9d1d9}
+.tab-btn.active{color:#58a6ff;border-bottom-color:#58a6ff}
+
+/* ── Main ── */
+#main{padding:20px 24px;max-width:1680px;margin:0 auto}
+.tab-panel{display:none}
+.tab-panel.active{display:block}
+
+/* ── Cards ── */
+.cards-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+@media(max-width:900px){.cards-grid{grid-template-columns:repeat(2,1fr)}}
+.card{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:16px}
+.card-lbl{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.card-val{font-size:22px;font-weight:700;font-family:'SF Mono',monospace}
+.card-sub{font-size:11px;color:#8b949e;margin-top:4px}
+.pos{color:#3fb950}.neg{color:#f85149}.neu{color:#e6edf3}.gld{color:#d29922}
+
+/* ── Chart containers ── */
+.ch{background:#161b22;border:1px solid #21262d;border-radius:8px;padding:4px;margin-bottom:16px}
+.sec-hdr{font-size:11px;font-weight:700;color:#8b949e;text-transform:uppercase;letter-spacing:.6px;margin:20px 0 10px;padding-bottom:6px;border-bottom:1px solid #21262d}
+
+/* ── Controls ── */
+.ctrl-bar{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.ctrl-bar label{color:#8b949e;font-size:12px}
+select{background:#161b22;border:1px solid #30363d;color:#c9d1d9;padding:6px 10px;border-radius:6px;font-size:12px;cursor:pointer}
+select:focus{outline:none;border-color:#58a6ff}
+.fund-toggles{display:flex;flex-wrap:wrap;gap:8px}
+.fund-toggle{display:flex;align-items:center;gap:4px;cursor:pointer;font-size:11px;color:#8b949e;white-space:nowrap}
+.fund-toggle input{cursor:pointer;accent-color:#58a6ff}
+
+/* ── Decision inspector layout ── */
+#dec-layout{display:grid;grid-template-columns:200px 1fr;gap:14px}
+#date-list{background:#161b22;border:1px solid #21262d;border-radius:8px;overflow-y:auto;max-height:calc(100vh - 190px);min-height:400px}
+.d-item{padding:9px 12px;cursor:pointer;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between;transition:background .12s;user-select:none}
+.d-item:hover{background:#1c2128}
+.d-item.sel{background:#0d2045;border-left:3px solid #58a6ff}
+.d-item .d-date{font-size:12px;font-family:monospace}
+.d-item .d-ret{font-size:11px;font-family:monospace}
+#dec-detail{background:#161b22;border:1px solid #21262d;border-radius:8px;overflow-y:auto;max-height:calc(100vh - 190px);min-height:400px;padding:16px}
+
+/* ── Subtabs ── */
+.stab-nav{display:flex;gap:0;border-bottom:1px solid #21262d;margin-bottom:14px}
+.stab-btn{background:none;border:none;color:#8b949e;padding:8px 13px;cursor:pointer;font-size:12px;border-bottom:2px solid transparent;transition:color .15s}
+.stab-btn:hover{color:#c9d1d9}
+.stab-btn.active{color:#58a6ff;border-bottom-color:#58a6ff}
+.stab-panel{display:none}
+.stab-panel.active{display:block}
+
+/* ── Text blocks ── */
+.txt-lbl{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;margin-top:14px}
+.txt-lbl:first-child{margin-top:0}
+.txt-block{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:12px;font-size:13px;line-height:1.65;color:#c9d1d9;white-space:pre-wrap;max-height:180px;overflow-y:auto}
+
+/* ── Tables ── */
+.tbl-wrap{overflow-x:auto}
+table.dt{width:100%;border-collapse:collapse;font-size:12px}
+table.dt th{background:#0d1117;color:#8b949e;text-align:left;padding:8px 10px;font-weight:600;text-transform:uppercase;font-size:10px;letter-spacing:.3px;border-bottom:1px solid #21262d;white-space:nowrap}
+table.dt td{padding:7px 10px;border-bottom:1px solid #21262d;color:#c9d1d9;vertical-align:middle}
+table.dt tr:hover td{background:#1c2128}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
+.b-buy{background:#0a2f1f;color:#3fb950;border:1px solid #1a5a31}
+.b-sell{background:#2f0a0a;color:#f85149;border:1px solid #5a1a1a}
+.b-hold{background:#1a1d27;color:#8b949e;border:1px solid #30363d}
+
+/* ── Empty / loading ── */
+.empty{text-align:center;padding:60px;color:#8b949e;font-size:14px}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#484f58}
+</style>
+</head>
+<body>
+
+<!-- ════ Upload Zone ════ -->
+<div id="upload-zone">
+  <div id="drop-area" onclick="document.getElementById('file-input').click()">
+    <div class="ico">📂</div>
+    <div class="lbl">将回测 JSON 文件拖拽至此，或 <span>点击选择文件</span></div>
+    <div class="lbl" style="margin-top:6px;font-size:11px">demo_outputs/*.json</div>
+  </div>
+  <input type="file" id="file-input" accept=".json">
+</div>
+
+<!-- ════ Info Bar ════ -->
+<div id="info-bar" style="display:none">
+  <div class="ii"><span class="ii-lbl">文件</span><span class="ii-val" id="ii-file">—</span></div>
+  <div class="ii"><span class="ii-lbl">回测区间</span><span class="ii-val" id="ii-dates">—</span></div>
+  <div class="ii"><span class="ii-lbl">交易天数</span><span class="ii-val" id="ii-days">—</span></div>
+  <div class="ii"><span class="ii-lbl">基金池</span><span class="ii-val" id="ii-funds">—</span></div>
+  <div style="margin-left:auto">
+    <button onclick="document.getElementById('file-input').click()"
+      style="background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:6px 14px;border-radius:6px;cursor:pointer;font-size:12px">
+      更换文件
+    </button>
+  </div>
+</div>
+
+<!-- ════ Tab Nav ════ -->
+<div id="tab-nav" style="display:none">
+  <button class="tab-btn active" onclick="showTab('summary',this)">📊 性能概览</button>
+  <button class="tab-btn" onclick="showTab('curve',this)">📈 净值曲线</button>
+  <button class="tab-btn" onclick="showTab('holdings',this)">🏦 持仓结构</button>
+  <button class="tab-btn" onclick="showTab('decisions',this)">🧠 决策检查器</button>
+  <button class="tab-btn" onclick="showTab('factors',this)">🔬 因子热力图</button>
+  <button class="tab-btn" onclick="showTab('trades',this)">💹 交易分析</button>
+</div>
+
+<!-- ════ Main Content ════ -->
+<div id="main" style="display:none">
+
+  <!-- Panel 1: Summary -->
+  <div id="panel-summary" class="tab-panel active">
+    <div class="cards-grid" id="cards"></div>
+    <div class="sec-hdr">日收益率分布</div>
+    <div class="ch"><div id="ch-returns" style="height:240px"></div></div>
+  </div>
+
+  <!-- Panel 2: Net Value Curve -->
+  <div id="panel-curve" class="tab-panel">
+    <div class="ctrl-bar">
+      <label>叠加基准 ETF：</label>
+      <div class="fund-toggles" id="fund-toggles"></div>
+    </div>
+    <div class="ch"><div id="ch-curve" style="height:500px"></div></div>
+  </div>
+
+  <!-- Panel 3: Holdings -->
+  <div id="panel-holdings" class="tab-panel">
+    <div class="ch"><div id="ch-holdings" style="height:500px"></div></div>
+  </div>
+
+  <!-- Panel 4: Decision Inspector -->
+  <div id="panel-decisions" class="tab-panel">
+    <div id="dec-layout">
+      <div id="date-list"></div>
+      <div id="dec-detail"><div class="empty">← 点击左侧日期查看决策详情</div></div>
+    </div>
+  </div>
+
+  <!-- Panel 5: Factor Heatmap -->
+  <div id="panel-factors" class="tab-panel">
+    <div class="ctrl-bar">
+      <label>选择技术因子：</label>
+      <select id="factor-sel" onchange="renderFactorHeatmap()"></select>
+      <label style="margin-left:16px;color:#8b949e;font-size:11px">▲ 买入 &nbsp;▼ 卖出（标注于热力图上）</label>
+    </div>
+    <div class="ch"><div id="ch-factor" style="height:520px"></div></div>
+  </div>
+
+  <!-- Panel 6: Trade Analysis -->
+  <div id="panel-trades" class="tab-panel">
+    <div class="sec-hdr">各基金交易频次</div>
+    <div class="ch"><div id="ch-trade-freq" style="height:380px"></div></div>
+    <div class="sec-hdr">逐笔交易记录</div>
+    <div class="ch tbl-wrap" style="max-height:400px;overflow-y:auto;padding:0">
+      <table class="dt" id="trade-tbl"></table>
+    </div>
+  </div>
+
+</div><!-- /#main -->
+
+<script>
+// ════════════════════════════════
+// STATE
+// ════════════════════════════════
+let DATA = null, PROC = null, selectedDate = null;
+const activeFunds = new Set();
+
+// ════════════════════════════════
+// CONSTANTS
+// ════════════════════════════════
+const FACTOR_LABELS = {
+  open_gap_pct:     '开盘跳空%',
+  ret_1d_pct:       '昨日收益%',
+  momentum_5d_pct:  '5日动量%',
+  momentum_20d_pct: '20日动量%',
+  ma5_bias_pct:     '5日均线偏离%',
+  ma20_bias_pct:    '20日均线偏离%',
+  volatility_10d_pct:'10日波动率%',
+  drawdown_20d_pct: '20日回撤%',
+  volume_ratio_5d:  '5日量比',
+  range_5d_pct:     '5日振幅%'
+};
+const FACTOR_KEYS = Object.keys(FACTOR_LABELS);
+
+// Static fund code → name map (from fund_info.py)
+const FUND_NAMES = {
+  "000300.SH":"沪深300","000905.SH":"中证500","399006.SZ":"创业板指",
+  "000688.SH":"科创50","000932.SH":"中证消费","000941.SH":"新能源指数",
+  "399971.SZ":"中证传媒","000819.SH":"有色金属指数","000928.SH":"中证能源指数",
+  "000012.SH":"国债指数","518880.SH":"黄金ETF",
+  "512880.SH":"证券ETF","512800.SH":"银行ETF","512070.SH":"保险ETF",
+  "159995.SZ":"半导体ETF","159819.SZ":"人工智能ETF","515880.SH":"通信设备ETF",
+  "159852.SZ":"软件ETF","512010.SH":"医药生物ETF","512170.SH":"医疗保健ETF",
+  "159992.SZ":"创新药ETF","515170.SH":"食品饮料ETF","512690.SH":"白酒ETF",
+  "512400.SH":"有色金属ETF","515220.SH":"煤炭ETF","159870.SZ":"化工ETF",
+  "512200.SH":"房地产ETF"
+};
+
+const COLORS = [
+  '#58a6ff','#3fb950','#d29922','#f78166','#bc8cff',
+  '#ff7b72','#39d353','#f0883e','#79c0ff','#a371f7',
+  '#54d9c8','#ffa657','#ff6b6b','#70b8ff','#e3a8ff','#56d364'
+];
+
+const LAYOUT_BASE = {
+  paper_bgcolor:'#161b22', plot_bgcolor:'#0d1117',
+  font:{color:'#c9d1d9',family:"'PingFang SC','Microsoft YaHei',sans-serif",size:12},
+  xaxis:{gridcolor:'#21262d',linecolor:'#30363d',tickfont:{size:11}},
+  yaxis:{gridcolor:'#21262d',linecolor:'#30363d',tickfont:{size:11}},
+  margin:{l:60,r:20,t:28,b:52},
+  legend:{bgcolor:'rgba(22,27,34,0.85)',bordercolor:'#21262d',borderwidth:1}
+};
+const CFG = {displayModeBar:false, responsive:true};
+
+// ════════════════════════════════
+// FILE LOADING
+// ════════════════════════════════
+const dropArea = document.getElementById('drop-area');
+const fileInput = document.getElementById('file-input');
+
+dropArea.addEventListener('dragover', e => { e.preventDefault(); dropArea.classList.add('dragover'); });
+dropArea.addEventListener('dragleave', () => dropArea.classList.remove('dragover'));
+dropArea.addEventListener('drop', e => {
+  e.preventDefault(); dropArea.classList.remove('dragover');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+
+function handleFile(file) {
+  const r = new FileReader();
+  r.onload = ev => {
+    try {
+      DATA = JSON.parse(ev.target.result);
+      PROC = processData(DATA);
+      boot(file.name);
+    } catch(e) { alert('JSON 解析失败：' + e.message); }
+  };
+  r.readAsText(file, 'utf-8');
+}
+
+function boot(filename) {
+  document.getElementById('upload-zone').style.display = 'none';
+  document.getElementById('info-bar').style.display    = 'flex';
+  document.getElementById('tab-nav').style.display     = 'flex';
+  document.getElementById('main').style.display        = 'block';
+
+  const dv = PROC.dailyValues;
+  document.getElementById('ii-file').textContent  = filename;
+  document.getElementById('ii-dates').textContent = `${dv[0]?.date||'?'} ~ ${dv[dv.length-1]?.date||'?'}`;
+  document.getElementById('ii-days').textContent  = dv.length + ' 天';
+  document.getElementById('ii-funds').textContent = PROC.allFunds.length + ' 只';
+
+  // Factor selector
+  const sel = document.getElementById('factor-sel');
+  sel.innerHTML = FACTOR_KEYS.map(k => `<option value="${k}">${FACTOR_LABELS[k]}</option>`).join('');
+
+  buildFundToggles();
+  renderAll();
+}
+
+// ════════════════════════════════
+// DATA PROCESSING
+// ════════════════════════════════
+function processData(raw) {
+  // 1. Net value series — last entry per date
+  const dailyValues = lastByDate(raw.portfolio_value_history || []);
+
+  // 2. Daily returns
+  const dailyReturns = dailyValues.slice(1).map((v,i) =>
+    dailyValues[i].value > 0 ? (v.value - dailyValues[i].value) / dailyValues[i].value : 0
+  );
+
+  // 3. Normalized curve
+  const iv = dailyValues[0]?.value || 1e5;
+  const portNorm = dailyValues.map(v => ({ date: v.date, value: v.value / iv }));
+
+  // 4. Derived stats
+  const sharpe   = calcSharpe(dailyReturns);
+  const maxDD    = calcMaxDD(dailyValues.map(v => v.value));
+  const winRate  = dailyReturns.length ? dailyReturns.filter(r=>r>0).length / dailyReturns.length : 0;
+
+  // 5. Transaction stats
+  const txHistory  = raw.transaction_history || [];
+  const buys       = txHistory.filter(t => t.action === 'buy');
+  const sells      = txHistory.filter(t => t.action === 'sell');
+  const totalComm  = txHistory.reduce((s,t) => s + (t.commission||0), 0);
+  const totalBuy   = buys.reduce((s,t) => s + (t.amount||0), 0);
+  const avgVal     = dailyValues.length ? dailyValues.reduce((s,v)=>s+v.value,0)/dailyValues.length : 1;
+  const turnover   = avgVal > 0 ? totalBuy / avgVal : 0;
+
+  // 6. After-trade snapshots
+  const snapMap = new Map();
+  (raw.daily_portfolio_snapshots||[])
+    .filter(s => s.snapshot_type === 'after_trade')
+    .sort((a,b) => a.date.localeCompare(b.date))
+    .forEach(s => snapMap.set(s.date, s));
+  const snapshots = [...snapMap.values()].sort((a,b) => a.date.localeCompare(b.date));
+
+  // 7. All funds
+  const fundsSet = new Set();
+  snapshots.forEach(s => Object.keys(s.holdings||{}).forEach(f => fundsSet.add(f)));
+  Object.keys(raw.fund_performance||{}).forEach(f => fundsSet.add(f));
+  const allFunds = [...fundsSet].sort();
+
+  // 8. Fund names from technical factor snapshots
+  const fundNames = buildFundNames(raw.agent_decisions||[]);
+
+  // 9. Decision map
+  const decMap = new Map();
+  (raw.agent_decisions||[]).forEach(d => decMap.set(d.date, d));
+
+  // 10. Factor matrix
+  const factorMatrix = buildFactorMatrix(raw.agent_decisions||[]);
+
+  // 11. Return map for date list coloring
+  const returnMap = new Map();
+  dailyReturns.forEach((r,i) => returnMap.set(dailyValues[i+1]?.date, r));
+
+  return {
+    dailyValues, dailyReturns, portNorm, sharpe, maxDD, winRate,
+    txHistory, buys, sells, totalComm, totalBuy, turnover,
+    snapshots, allFunds, fundNames, decMap, factorMatrix, returnMap,
+    raw
+  };
+}
+
+function lastByDate(records) {
+  const m = new Map();
+  records.forEach(r => m.set(r.date, r));
+  return [...m.values()].sort((a,b) => a.date.localeCompare(b.date));
+}
+
+function calcSharpe(rets) {
+  if (rets.length < 2) return 0;
+  const n = rets.length;
+  const mean = rets.reduce((s,r)=>s+r,0) / n;
+  const std  = Math.sqrt(rets.reduce((s,r)=>s+Math.pow(r-mean,2),0) / (n-1));
+  return std > 0 ? (mean/std) * Math.sqrt(252) : 0;
+}
+
+function calcMaxDD(vals) {
+  let peak = vals[0]||0, maxDD = 0;
+  for (const v of vals) {
+    if (v > peak) peak = v;
+    if (peak > 0) { const dd = (v-peak)/peak; if (dd < maxDD) maxDD = dd; }
+  }
+  return maxDD; // negative
+}
+
+function getCore(ad) {
+  if (!ad) return {};
+  const d = ad.decision;
+  if (!d) return {};
+  if (d.decision && typeof d.decision === 'object') return d.decision;
+  return d;
+}
+
+function buildFundNames(ads) {
+  const m = {};
+  for (const ad of ads) {
+    const snap = getCore(ad).technical_factors_snapshot || {};
+    for (const [id, info] of Object.entries(snap)) {
+      if (info.fund_name && !m[id]) m[id] = info.fund_name;
+    }
+  }
+  return m;
+}
+
+function buildFactorMatrix(ads) {
+  const dates = ads.map(d => d.date);
+  const fundsSet = new Set();
+  ads.forEach(ad => {
+    Object.keys(getCore(ad).technical_factors_snapshot||{}).forEach(f => fundsSet.add(f));
+  });
+  const funds = [...fundsSet].sort();
+  const result = { dates, funds };
+  for (const fk of FACTOR_KEYS) {
+    result[fk] = {};
+    for (const fund of funds) {
+      result[fk][fund] = ads.map(ad =>
+        getCore(ad).technical_factors_snapshot?.[fund]?.factors?.[fk] ?? null
+      );
+    }
+  }
+  return result;
+}
+
+// Fund display name: static map first, then dynamic from agent decisions
+function fn(id) { return FUND_NAMES[id] || PROC?.fundNames[id] || id; }
+function pct(v, d=2) { return typeof v === 'number' ? (v*100).toFixed(d)+'%' : '—'; }
+function fx(v, d=2) { return typeof v === 'number' ? v.toFixed(d) : '—'; }
+function esc(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ════════════════════════════════
+// UI UTILITIES
+// ════════════════════════════════
+function showTab(name, el) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  if (el) el.classList.add('active');
+  setTimeout(() => {
+    ['ch-returns','ch-curve','ch-holdings','ch-factor','ch-trade-freq','ch-dec-factors'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && el._fullLayout) Plotly.Plots.resize(el);
+    });
+  }, 50);
+}
+
+function showStab(name, el) {
+  const detail = document.getElementById('dec-detail');
+  detail.querySelectorAll('.stab-btn').forEach(b => b.classList.remove('active'));
+  detail.querySelectorAll('.stab-panel').forEach(p => p.classList.remove('active'));
+  if (el) el.classList.add('active');
+  else detail.querySelector(`.stab-btn[data-s="${name}"]`)?.classList.add('active');
+  detail.querySelector(`.stab-panel[data-s="${name}"]`)?.classList.add('active');
+  if (name === 'factor-snap' && selectedDate) {
+    setTimeout(() => renderDecFactors(selectedDate), 60);
+  }
+}
+
+// ════════════════════════════════
+// PANEL 1 — SUMMARY
+// ════════════════════════════════
+function renderSummary() {
+  const p = PROC, perf = p.raw.performance;
+  const cards = [
+    { lbl:'总收益率',     val:pct(perf.total_return),          cls:perf.total_return>=0?'pos':'neg', sub:`期末净值 ¥${(perf.final_portfolio_value||0).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',')}` },
+    { lbl:'年化收益率',   val:pct(perf.annualized_return),     cls:perf.annualized_return>=0?'pos':'neg', sub:'按252交易日折算' },
+    { lbl:'夏普比率',     val:p.sharpe.toFixed(3),             cls:p.sharpe>=1?'pos':p.sharpe>=0?'neu':'neg', sub:'竞赛核心指标 (日收益×√252)' },
+    { lbl:'最大回撤',     val:pct(p.maxDD),                    cls:'neg', sub:'历史最大峰谷跌幅' },
+    { lbl:'日胜率',       val:pct(p.winRate),                  cls:p.winRate>=0.5?'pos':'neu', sub:`${p.dailyReturns.filter(r=>r>0).length} 涨 / ${p.dailyReturns.filter(r=>r<0).length} 跌` },
+    { lbl:'总交易次数',   val:p.txHistory.length,              cls:'neu', sub:`买入 ${p.buys.length} / 卖出 ${p.sells.length}` },
+    { lbl:'总手续费',     val:'¥'+p.totalComm.toFixed(2),      cls:'neu', sub:`占总买入额 ${p.totalBuy>0?(p.totalComm/p.totalBuy*100).toFixed(3):0}%` },
+    { lbl:'换手率',       val:p.turnover.toFixed(2)+'×',       cls:'neu', sub:`总买入额 ¥${p.totalBuy.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',')}` }
+  ];
+  document.getElementById('cards').innerHTML = cards.map(c =>
+    `<div class="card">
+      <div class="card-lbl">${c.lbl}</div>
+      <div class="card-val ${c.cls}">${c.val}</div>
+      <div class="card-sub">${c.sub}</div>
+    </div>`
+  ).join('');
+
+  const pos = p.dailyReturns.filter(r=>r>=0).map(r=>r*100);
+  const neg = p.dailyReturns.filter(r=>r<0).map(r=>r*100);
+  Plotly.newPlot('ch-returns', [
+    { x:neg, type:'histogram', name:'负收益', marker:{color:'#f85149',opacity:.8}, nbinsx:15 },
+    { x:pos, type:'histogram', name:'正收益', marker:{color:'#3fb950',opacity:.8}, nbinsx:15 }
+  ], {
+    ...LAYOUT_BASE,
+    barmode:'overlay',
+    margin:{l:50,r:20,t:20,b:40},
+    xaxis:{...LAYOUT_BASE.xaxis, title:'日收益率 (%)'},
+    yaxis:{...LAYOUT_BASE.yaxis, title:'天数'}
+  }, CFG);
+}
+
+// ════════════════════════════════
+// PANEL 2 — NET VALUE CURVE
+// ════════════════════════════════
+function buildFundToggles() {
+  const funds = Object.keys(PROC.raw.fund_performance||{}).sort();
+  document.getElementById('fund-toggles').innerHTML = funds.map(f =>
+    `<label class="fund-toggle">
+      <input type="checkbox" value="${f}" onchange="onFundToggle(this)">
+      ${FUND_NAMES[f] || f}
+    </label>`
+  ).join('');
+}
+
+function onFundToggle(cb) {
+  cb.checked ? activeFunds.add(cb.value) : activeFunds.delete(cb.value);
+  renderCurve();
+}
+
+function renderCurve() {
+  const p = PROC;
+  const traces = [];
+
+  // Portfolio line
+  traces.push({
+    x: p.portNorm.map(v=>v.date),
+    y: p.portNorm.map(v=>v.value),
+    type:'scatter', mode:'lines', name:'📦 组合净值',
+    line:{color:'#58a6ff',width:2.5},
+    hovertemplate:'%{x}<br>净值: %{y:.4f}<extra></extra>'
+  });
+
+  // Baseline = 1.0
+  traces.push({
+    x: p.portNorm.map(v=>v.date),
+    y: p.portNorm.map(()=>1),
+    type:'scatter', mode:'lines', name:'基准线',
+    line:{color:'#30363d',width:1,dash:'dot'},
+    showlegend:false,
+    hoverinfo:'skip'
+  });
+
+  // Fund benchmarks
+  const fp = p.raw.fund_performance||{};
+  for (const fund of activeFunds) {
+    const series = fp[fund]; if (!series) continue;
+    // Normalize to start at 1.0
+    const iv = series[0]?.value || 1;
+    const fname = FUND_NAMES[fund] || fund;
+    traces.push({
+      x: series.map(v=>v.date),
+      y: series.map(v=>v.value/iv),
+      type:'scatter', mode:'lines', name:fname,
+      line:{width:1,dash:'dot'}, opacity:.7,
+      hovertemplate:`${fname}<br>%{x}: %{y:.4f}<extra></extra>`
+    });
+  }
+
+  // Merge all trades per day into one marker per date
+  const tradeByDate = {};
+  p.txHistory.forEach(t => {
+    if (!tradeByDate[t.date]) tradeByDate[t.date] = { buys: [], sells: [] };
+    if (t.action === 'buy')
+      tradeByDate[t.date].buys.push(`▲ ${fn(t.fund_id)} ¥${(t.amount||0).toFixed(0)}`);
+    else
+      tradeByDate[t.date].sells.push(`▼ ${fn(t.fund_id)} ${pct(t.percentage||0)}`);
+  });
+
+  const tradePts = Object.entries(tradeByDate).map(([date, {buys, sells}]) => {
+    const value = p.portNorm.find(v => v.date === date)?.value;
+    if (value === undefined) return null;
+    const hasBuy = buys.length > 0, hasSell = sells.length > 0;
+    return {
+      date, value,
+      text: [...buys, ...sells].join('<br>'),
+      symbol: hasBuy && hasSell ? 'diamond' : hasBuy ? 'triangle-up' : 'triangle-down',
+      color:  hasBuy && hasSell ? '#d29922'  : hasBuy ? '#3fb950'    : '#f85149'
+    };
+  }).filter(Boolean);
+
+  if (tradePts.length) traces.push({
+    x: tradePts.map(v => v.date),
+    y: tradePts.map(v => v.value),
+    text: tradePts.map(v => v.text),
+    type:'scatter', mode:'markers', name:'交易',
+    marker:{ symbol: tradePts.map(v=>v.symbol), size:12, color: tradePts.map(v=>v.color) },
+    hovertemplate:'<b>%{x}</b><br>%{text}<extra></extra>'
+  });
+
+  Plotly.react('ch-curve', traces, {
+    ...LAYOUT_BASE,
+    xaxis:{...LAYOUT_BASE.xaxis, type:'category', title:'日期', tickangle:-45},
+    yaxis:{...LAYOUT_BASE.yaxis, title:'归一化净值', tickformat:'.4f'},
+    hovermode:'closest'
+  }, CFG);
+}
+
+// ════════════════════════════════
+// PANEL 3 — HOLDINGS STRUCTURE
+// ════════════════════════════════
+function renderHoldings() {
+  const p = PROC;
+  const snaps = p.snapshots;
+  if (!snaps.length) return;
+
+  const dates = snaps.map(s=>s.date);
+  const fundsSet = new Set();
+  snaps.forEach(s => Object.keys(s.holdings||{}).forEach(f=>fundsSet.add(f)));
+  const funds = [...fundsSet].sort();
+  const traces = [];
+
+  funds.forEach((fund,i) => {
+    traces.push({
+      x: dates,
+      y: snaps.map(s => s.holdings?.[fund]?.value || 0),
+      name: fund, type:'bar',
+      marker:{color:COLORS[i%COLORS.length]},
+      hovertemplate:`${fund}${fn(fund)?` (${fn(fund)})`:''}<br>%{x}<br>¥%{y:,.0f}<extra></extra>`
+    });
+  });
+  traces.push({
+    x: dates, y: snaps.map(s=>s.capital||0),
+    name:'💰 现金', type:'bar',
+    marker:{color:'#484f58'},
+    hovertemplate:'现金<br>%{x}<br>¥%{y:,.0f}<extra></extra>'
+  });
+
+  Plotly.newPlot('ch-holdings', traces, {
+    ...LAYOUT_BASE, barmode:'stack',
+    xaxis:{...LAYOUT_BASE.xaxis, type:'category', title:'日期', tickangle:-45},
+    yaxis:{...LAYOUT_BASE.yaxis, title:'市值 (元)', tickformat:',.0f'},
+    legend:{...LAYOUT_BASE.legend, orientation:'h', y:-0.25}
+  }, CFG);
+}
+
+// ════════════════════════════════
+// PANEL 4 — DECISION INSPECTOR
+// ════════════════════════════════
+function renderDecisionList() {
+  const p = PROC;
+  const dates = [...p.decMap.keys()].sort();
+  if (!dates.length) {
+    document.getElementById('date-list').innerHTML = '<div class="empty" style="padding:20px;font-size:12px">无决策数据</div>';
+    return;
+  }
+  document.getElementById('date-list').innerHTML = dates.map(date => {
+    const ret = p.returnMap.get(date);
+    const retStr = ret !== undefined ? pct(ret) : '—';
+    const cls = ret === undefined ? '' : ret >= 0 ? 'pos' : 'neg';
+    return `<div class="d-item" id="di-${date}" onclick="selectDate('${date}')">
+      <span class="d-date">${date}</span>
+      <span class="d-ret ${cls}">${retStr}</span>
+    </div>`;
+  }).join('');
+}
+
+function selectDate(date) {
+  selectedDate = date;
+  document.querySelectorAll('.d-item').forEach(el => el.classList.remove('sel'));
+  const item = document.getElementById('di-'+date);
+  if (item) { item.classList.add('sel'); item.scrollIntoView({block:'nearest'}); }
+  renderDecisionDetail(date);
+}
+
+function renderDecisionDetail(date) {
+  const ad = PROC.decMap.get(date); if (!ad) return;
+  const core   = getCore(ad);
+  const trades = core.trades || [];
+  const results= ad.trade_results || [];
+
+  const actionBadge = a => a==='buy'
+    ? '<span class="badge b-buy">买入</span>'
+    : a==='sell'
+    ? '<span class="badge b-sell">卖出</span>'
+    : '<span class="badge b-hold">持有</span>';
+
+  document.getElementById('dec-detail').innerHTML = `
+    <div style="margin-bottom:12px">
+      <span style="font-size:16px;font-weight:700;color:#e6edf3">${date}</span>
+      <span style="font-size:12px;color:#8b949e;margin-left:12px">决策 ${trades.length} 只 · 执行 ${results.length} 笔</span>
+    </div>
+
+    <div class="stab-nav">
+      <button class="stab-btn active" data-s="reasoning" onclick="showStab('reasoning',this)">推理过程</button>
+      <button class="stab-btn" data-s="decisions" onclick="showStab('decisions',this)">决策详情</button>
+      <button class="stab-btn" data-s="factor-snap" onclick="showStab('factor-snap',this)">技术因子</button>
+      <button class="stab-btn" data-s="results" onclick="showStab('results',this)">执行结果</button>
+    </div>
+
+    <!-- 推理 -->
+    <div class="stab-panel active" data-s="reasoning">
+      <div class="txt-lbl">综合推理</div>
+      <div class="txt-block">${esc(core.reasoning||'—')}</div>
+      <div class="txt-lbl">思维链</div>
+      <div class="txt-block">${esc(core.chain_of_thought||'—')}</div>
+      <div class="txt-lbl">风险评估</div>
+      <div class="txt-block">${esc(core.risk_assessment||'—')}</div>
+    </div>
+
+    <!-- 决策表 -->
+    <div class="stab-panel" data-s="decisions">
+      <div class="tbl-wrap"><table class="dt">
+        <thead><tr><th>基金</th><th>操作</th><th>参数</th><th>决策理由</th></tr></thead>
+        <tbody>${trades.map(t=>`
+          <tr>
+            <td style="font-family:monospace">${esc(t.fund_id)}<br>
+              <span style="color:#8b949e;font-size:10px">${esc(fn(t.fund_id))}</span></td>
+            <td>${actionBadge(t.action)}</td>
+            <td style="font-family:monospace;white-space:nowrap">
+              ${t.action==='buy'?'¥'+(t.amount||0).toLocaleString():t.action==='sell'?pct(t.percentage||0):'—'}
+            </td>
+            <td style="font-size:11px;color:#8b949e;max-width:260px">${esc(t.reason||'')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>
+
+    <!-- 技术因子热力图 -->
+    <div class="stab-panel" data-s="factor-snap">
+      <div id="ch-dec-factors" style="height:400px"></div>
+    </div>
+
+    <!-- 执行结果 -->
+    <div class="stab-panel" data-s="results">
+      ${results.length===0?'<div class="empty" style="padding:30px">无执行记录</div>':`
+      <div class="tbl-wrap"><table class="dt">
+        <thead><tr><th>基金</th><th>操作</th><th>金额</th><th>手续费</th><th>成交价</th><th>状态</th></tr></thead>
+        <tbody>${results.map(r=>`
+          <tr>
+            <td style="font-family:monospace">${esc(r.fund_id)}</td>
+            <td>${actionBadge(r.action)}</td>
+            <td style="font-family:monospace">
+              ${r.action==='buy'
+                ?'¥'+(r.executed_amount||r.amount||0).toFixed(0)
+                :'¥'+(r.sold_value||0).toFixed(0)+' ('+pct(r.percentage||0)+')'}
+            </td>
+            <td style="font-family:monospace;color:#8b949e">¥${(r.commission||0).toFixed(3)}</td>
+            <td style="font-family:monospace">${r.close_price??'—'}</td>
+            <td style="color:${r.success!==false?'#3fb950':'#f85149'}">${r.success!==false?'✓ 成功':'✗ 失败'}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>`}
+    </div>`;
+}
+
+function renderDecFactors(date) {
+  const ad = PROC.decMap.get(date); if (!ad) return;
+  const core  = getCore(ad);
+  const snap  = core.technical_factors_snapshot || {};
+  const trades= core.trades || [];
+  const actionMap = {};
+  trades.forEach(t => actionMap[t.fund_id] = t.action);
+
+  const funds = Object.keys(snap).sort();
+  if (!funds.length) {
+    document.getElementById('ch-dec-factors').innerHTML =
+      '<div class="empty" style="padding:30px">无技术因子数据</div>';
+    return;
+  }
+
+  const factors = FACTOR_KEYS.filter(k => funds.some(f => snap[f]?.factors?.[k] !== undefined));
+  const z = funds.map(fund => factors.map(f => snap[fund]?.factors?.[f] ?? null));
+  const zTxt = z.map(row => row.map(v => v !== null ? v.toFixed(2) : ''));
+
+  const yLabels = funds.map(f => {
+    const a = actionMap[f];
+    return (a==='buy'?'▲ ':a==='sell'?'▼ ':'  ') + f;
+  });
+
+  Plotly.newPlot('ch-dec-factors', [{
+    type:'heatmap',
+    x: factors.map(f => FACTOR_LABELS[f]||f),
+    y: yLabels,
+    z, text: zTxt,
+    texttemplate:'%{text}', textfont:{size:10},
+    colorscale:[
+      [0,'#b91c1c'],[0.4,'#7f1d1d'],[0.5,'#1a1d27'],[0.6,'#14532d'],[1,'#16a34a']
+    ],
+    zmid:0, showscale:true,
+    hovertemplate:'%{y}<br>%{x}: %{z:.3f}<extra></extra>'
+  }], {
+    ...LAYOUT_BASE,
+    margin:{l:110,r:80,t:20,b:90},
+    xaxis:{tickangle:-35, tickfont:{size:10}},
+    yaxis:{tickfont:{size:10}, autorange:'reversed'}
+  }, CFG);
+}
+
+// ════════════════════════════════
+// PANEL 5 — FACTOR HEATMAP
+// ════════════════════════════════
+function renderFactorHeatmap() {
+  const factor = document.getElementById('factor-sel').value;
+  const fm = PROC.factorMatrix;
+  if (!fm || !fm.funds.length) return;
+
+  const z = fm.funds.map(fund => fm[factor]?.[fund] || []);
+
+  // Overlay action annotations
+  const annotations = [];
+  fm.dates.forEach(date => {
+    const ad = PROC.decMap.get(date); if (!ad) return;
+    const trades = getCore(ad).trades || [];
+    const actionMap = {};
+    trades.forEach(t => actionMap[t.fund_id] = t.action);
+    fm.funds.forEach(fund => {
+      const a = actionMap[fund];
+      if (a === 'buy' || a === 'sell') {
+        const yLabel = fm.funds.indexOf(fund);
+        annotations.push({
+          x: date, y: fund,
+          text: a==='buy' ? '▲' : '▼',
+          font:{ color: a==='buy'?'#3fb950':'#f85149', size:12 },
+          showarrow: false
+        });
+      }
+    });
+  });
+
+  Plotly.react('ch-factor', [{
+    type:'heatmap',
+    x: fm.dates, y: fm.funds, z,
+    colorscale:[
+      [0,'#b91c1c'],[0.4,'#7f1d1d'],[0.5,'#161b22'],[0.6,'#14532d'],[1,'#16a34a']
+    ],
+    zmid:0, showscale:true,
+    hovertemplate:'%{y}<br>%{x}<br>'+FACTOR_LABELS[factor]+': %{z:.3f}<extra></extra>'
+  }], {
+    ...LAYOUT_BASE,
+    margin:{l:100,r:80,t:20,b:80},
+    xaxis:{...LAYOUT_BASE.xaxis, type:'category', tickangle:-45, tickfont:{size:10}},
+    yaxis:{...LAYOUT_BASE.yaxis, tickfont:{size:10}, autorange:'reversed'},
+    annotations
+  }, CFG);
+}
+
+// ════════════════════════════════
+// PANEL 6 — TRADE ANALYSIS
+// ════════════════════════════════
+function renderTrades() {
+  const p = PROC;
+
+  // Frequency per fund
+  const freq = {};
+  p.txHistory.forEach(t => {
+    if (!freq[t.fund_id]) freq[t.fund_id] = {buy:0, sell:0};
+    freq[t.fund_id][t.action]++;
+  });
+  const funds = Object.keys(freq).sort((a,b) =>
+    (freq[b].buy+freq[b].sell) - (freq[a].buy+freq[a].sell)
+  );
+
+  Plotly.newPlot('ch-trade-freq', [
+    {
+      x: funds.map(f=>freq[f].buy), y: funds,
+      type:'bar', orientation:'h', name:'买入次数',
+      marker:{color:'#3fb950'},
+      hovertemplate:'%{y}: %{x} 次<extra>买入</extra>'
+    },
+    {
+      x: funds.map(f=>freq[f].sell), y: funds,
+      type:'bar', orientation:'h', name:'卖出次数',
+      marker:{color:'#f85149'},
+      hovertemplate:'%{y}: %{x} 次<extra>卖出</extra>'
+    }
+  ], {
+    ...LAYOUT_BASE, barmode:'group',
+    margin:{l:90,r:20,t:20,b:50},
+    xaxis:{...LAYOUT_BASE.xaxis, title:'交易次数'},
+    yaxis:{...LAYOUT_BASE.yaxis, autorange:'reversed'}
+  }, CFG);
+
+  // Transaction table
+  const rows = p.txHistory.map((t,i) => `
+    <tr>
+      <td style="color:#8b949e">${i+1}</td>
+      <td style="font-family:monospace">${esc(t.date)}</td>
+      <td style="font-family:monospace">${esc(t.fund_id)}<br>
+        <span style="color:#8b949e;font-size:10px">${esc(fn(t.fund_id))}</span></td>
+      <td>${t.action==='buy'
+        ?'<span class="badge b-buy">买入</span>'
+        :'<span class="badge b-sell">卖出</span>'}</td>
+      <td style="font-family:monospace">
+        ${t.action==='buy'
+          ?'¥'+(t.amount||0).toLocaleString('zh-CN',{maximumFractionDigits:0})
+          :'¥'+(t.amount_sold||0).toLocaleString('zh-CN',{maximumFractionDigits:0})+' ('+pct(t.percentage||0)+')'}
+      </td>
+      <td style="font-family:monospace;color:#8b949e">¥${(t.commission||0).toFixed(3)}</td>
+    </tr>`).join('');
+
+  document.getElementById('trade-tbl').innerHTML = `
+    <thead><tr>
+      <th>#</th><th>日期</th><th>基金</th><th>操作</th><th>金额</th><th>手续费</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>`;
+}
+
+// ════════════════════════════════
+// RENDER ALL
+// ════════════════════════════════
+function renderAll() {
+  renderSummary();
+  renderCurve();
+  renderHoldings();
+  renderDecisionList();
+  renderFactorHeatmap();
+  renderTrades();
+}
+</script>
+</body>
+</html>
