@@ -75,6 +75,16 @@ async def save_global_cache():
 class NewsProcessingAgent:
     """新闻处理Agent - 负责新闻摘要提取"""
 
+    # Model concurrency limits
+    MODEL_CONCURRENCY_LIMITS = {
+        "deepseek-v4-flash": 2500,
+        "deepseek-v4-pro": 500,
+        "gpt-4": 100,
+        "gpt-3.5-turbo": 500,
+        "claude-opus-4": 100,
+        "default": 25,
+    }
+
     def __init__(self, model_name="EFundGPT-pro"):
         self.llm = ChatOpenAI(
             base_url=os.getenv("OPENAI_API_BASE"),
@@ -84,6 +94,11 @@ class NewsProcessingAgent:
             model_kwargs={   # kimi-k2.6允许json输出
                 "response_format": {"type": "json_object"}
             }
+        )
+        # Set max_workers based on model
+        self.max_workers = self.MODEL_CONCURRENCY_LIMITS.get(
+            model_name,
+            self.MODEL_CONCURRENCY_LIMITS["default"]
         )
         load_global_cache()  # avoid duplicate requests to save tokens
 
@@ -234,11 +249,15 @@ class NewsProcessingAgent:
         }
 
     async def process_news_batch(
-        self, news_list: List[Dict], max_workers: int = 25    # kimi-k2.6限制3
+        self, news_list: List[Dict], max_workers: int = None
     ) -> List[Dict]:
         """批量处理新闻摘要（并发）"""
         if not news_list:
             return []
+
+        # Use instance default if not specified
+        if max_workers is None:
+            max_workers = self.max_workers
 
         semaphore = asyncio.Semaphore(max_workers)
 
