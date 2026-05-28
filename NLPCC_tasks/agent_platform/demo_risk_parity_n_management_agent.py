@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Risk Parity + Agent Demo Backtest Runner.
+Risk Parity + Risk Management Agent Demo Backtest Runner.
 
-This demo integrates the risk parity baseline weights with an LLM trading agent.
-The agent receives both risk parity weights (current and previous period) and news data
-to make informed trading decisions.
+This demo integrates:
+1. Risk Parity baseline weights
+2. 4-Agent system: News → Sentiment → Trading → Risk Management
+3. Risk Management Agent enforces holding periods and controls trading frequency
 """
 
 import argparse
@@ -30,6 +31,7 @@ from agent_platform.agents.advanced_agents import (
     NewsProcessingAgent,
     SentimentAnalysisAgent,
     TradingStrategyAgent,
+    RiskManagementAgent,
 )
 from agent_platform.agents.fund_info import FUND_INFO
 from agent_platform.agents.trading_strategy_prompt import RISK_PARITY_TRADING_PROMPT
@@ -38,6 +40,36 @@ from agent_platform.utils import CustomJsonOutputParser
 from config import AGENT_PLATFORM, DATA_DIRS
 from server_platform.app.core.data_loader import get_data_loader, init_data_loader
 from server_platform.app.models.backtest import AgentDecision
+
+
+def _clean_trade_for_server(trade: Dict) -> Dict:
+    """Clean trade dict to match server validation requirements.
+
+    Server requires:
+    - buy: amount must be set, percentage must be None/not present
+    - sell: percentage must be set, amount must be None/not present
+    """
+    action = trade.get("action", "")
+    cleaned = {
+        "fund_id": trade.get("fund_id"),
+        "action": action,
+        "reason": trade.get("reason", ""),
+    }
+
+    if action == "buy":
+        cleaned["amount"] = trade.get("amount", 0)
+        # Do NOT include percentage for buy trades
+    elif action == "sell":
+        cleaned["percentage"] = trade.get("percentage", 0)
+        # Do NOT include amount for sell trades
+    elif action == "hold":
+        # For hold, keep optional fields if present
+        if "amount" in trade:
+            cleaned["amount"] = trade["amount"]
+        if "percentage" in trade:
+            cleaned["percentage"] = trade["percentage"]
+
+    return cleaned
 
 
 def _clean_nan_value(value):
@@ -219,8 +251,8 @@ class RiskParityCalculator:
         return weights
 
 
-class RiskParityTradingAgent:
-    """Trading Agent that incorporates risk parity weights into decision making."""
+class RiskParityWithManagementAgent:
+    """Trading Agent with 4-Agent System: News → Sentiment → Trading → Risk Management."""
 
     def __init__(
         self,
@@ -229,6 +261,8 @@ class RiskParityTradingAgent:
         decision_model_name: str = "deepseek-v4-pro",
         news_model_name: str = "deepseek-v4-flash",
         vol_lookback: int = 60,
+        min_holding_days: int = 7,
+        max_position_concentration: float = 0.4,
     ):
         self.agent_id = agent_id
         self.news_agent = NewsProcessingAgent(
@@ -239,6 +273,11 @@ class RiskParityTradingAgent:
             prompt_template=trading_prompt_template or RISK_PARITY_TRADING_PROMPT,
             model_name=decision_model_name,
         )
+        self.risk_management_agent = RiskManagementAgent(
+            model_name=decision_model_name,
+            min_holding_days=min_holding_days,
+            max_position_concentration=max_position_concentration,
+        )
         self.rp_calculator = RiskParityCalculator(lookback_days=vol_lookback)
         self.vol_lookback = vol_lookback
 
@@ -246,6 +285,14 @@ class RiskParityTradingAgent:
         self.trading_history = []
         self.platform_trading_history = []
         self.prev_rp_weights = {}
+
+        # Risk management statistics
+        self.risk_stats = {
+            "total_trades_proposed": 0,
+            "total_trades_approved": 0,
+            "total_trades_modified": 0,
+            "total_trades_blocked": 0,
+        }
 
     def _format_rp_weights(self, weights: Dict[str, float], fund_pool: List[str]) -> str:
         """Format risk parity weights for display in prompt."""
@@ -266,9 +313,9 @@ class RiskParityTradingAgent:
         fund_pool: List[str],
         view_platform_trading_history_days: int = 5,
     ) -> Dict:
-        """Complete decision flow with risk parity integration."""
+        """Complete 4-agent decision flow with risk management."""
 
-        logger.info(f"🤖 {self.agent_id} 开始决策流程（含风险平价基准）...")
+        logger.info(f"🤖 {self.agent_id} 开始4-Agent决策流程（新闻→舆情→交易→风控）...")
 
         # 0. Calculate risk parity weights
         logger.info("📊 计算风险平价基准权重...")
@@ -282,12 +329,12 @@ class RiskParityTradingAgent:
         prev_rp_weights_text = self._format_rp_weights(self.prev_rp_weights, fund_pool)
 
         # 1. News processing
-        logger.info("📰 新闻处理中...")
+        logger.info("📰 [Agent 1/4] 新闻处理中...")
         processed_news = await self.news_agent.process_news_batch(news_data)
         logger.info(f"  处理完成: {len(processed_news)}/{len(news_data)} 条新闻")
 
         # 2. Sentiment analysis
-        logger.info("🎯 舆情分析中...")
+        logger.info("🎯 [Agent 2/4] 舆情分析中...")
         sentiment_analysis = await self.sentiment_agent.analyze_sentiment(
             date_to_decision, processed_news, fund_pool
         )
@@ -296,7 +343,7 @@ class RiskParityTradingAgent:
         )
 
         # 3. Trading decision with risk parity weights
-        logger.info("💹 交易决策中（结合风险平价基准）...")
+        logger.info("💹 [Agent 3/4] 交易决策中（结合风险平价基准）...")
         trading_decision = await self.trading_agent.make_trading_decision_with_rp(
             date_to_decision,
             sentiment_analysis,
@@ -312,7 +359,56 @@ class RiskParityTradingAgent:
             prev_rp_weights_text,
             self.vol_lookback,
         )
-        logger.info(f"  生成 {len(trading_decision.get('trades', []))} 个交易指令")
+        proposed_trades = trading_decision.get("trades", [])
+        logger.info(f"  生成 {len(proposed_trades)} 个交易指令")
+        self.risk_stats["total_trades_proposed"] += len(proposed_trades)
+
+        # 4. Risk management evaluation
+        logger.info("🛡️ [Agent 4/4] 风险管理评估中...")
+        risk_result = await self.risk_management_agent.evaluate_trades(
+            proposed_trades=proposed_trades,
+            current_portfolio=current_portfolio,
+            sentiment_analysis=sentiment_analysis,
+            current_date=date_to_decision,
+            current_rp_weights=current_rp_weights,
+        )
+
+        approved_trades = risk_result.get("approved_trades", [])
+        modified_trades = risk_result.get("modified_trades", [])
+        blocked_trades = risk_result.get("blocked_trades", [])
+
+        # Update statistics
+        self.risk_stats["total_trades_approved"] += len(approved_trades)
+        self.risk_stats["total_trades_modified"] += len(modified_trades)
+        self.risk_stats["total_trades_blocked"] += len(blocked_trades)
+
+        # Log risk management actions
+        if modified_trades:
+            logger.warning(f"  🛡️ 调整 {len(modified_trades)} 笔交易")
+            for mt in modified_trades:
+                logger.warning(f"    - {mt['fund_id']}: {mt.get('reason', 'N/A')}")
+        if blocked_trades:
+            logger.warning(f"  🛡️ 阻止 {len(blocked_trades)} 笔交易")
+            for bt in blocked_trades:
+                logger.warning(f"    - {bt['fund_id']}: {bt.get('reason', 'N/A')}")
+
+        logger.info(f"  最终执行: {len(approved_trades)} 笔交易 | 风险摘要: {risk_result.get('risk_summary', 'N/A')}")
+
+        # Combine approved and modified trades for final execution
+        final_trades = approved_trades + [
+            {k: v for k, v in mt.items() if k in ["fund_id", "action", "amount", "percentage", "reason"]}
+            for mt in modified_trades
+        ]
+
+        # Update trading decision with final trades
+        final_decision = trading_decision.copy()
+        final_decision["trades"] = final_trades
+        final_decision["risk_management"] = {
+            "approved": len(approved_trades),
+            "modified": len(modified_trades),
+            "blocked": len(blocked_trades),
+            "risk_summary": risk_result.get("risk_summary", ""),
+        }
 
         # Store current weights as previous for next iteration
         self.prev_rp_weights = current_rp_weights
@@ -324,23 +420,24 @@ class RiskParityTradingAgent:
             "processed_news_count": len(processed_news),
             "sentiment_analysis": sentiment_analysis,
             "trading_decision": trading_decision,
+            "risk_management_result": risk_result,
+            "final_decision": final_decision,
             "portfolio_value": current_portfolio.get("total_value", 0),
         }
         self.decision_history.append(decision_record)
         self.trading_history.append(
             {
-                decision_record["date"]: decision_record["trading_decision"].get(
-                    "trades", []
-                )
+                decision_record["date"]: final_trades
             }
         )
 
         return {
-            "final_decision": trading_decision,
+            "final_decision": final_decision,
             "intermediate_results": {
                 "rp_weights": current_rp_weights,
                 "processed_news": processed_news,
                 "sentiment_analysis": sentiment_analysis,
+                "risk_management": risk_result,
             },
         }
 
@@ -348,10 +445,28 @@ class RiskParityTradingAgent:
         """Get decision history."""
         return self.decision_history
 
+    def get_risk_statistics(self) -> Dict:
+        """Get risk management statistics."""
+        total = self.risk_stats["total_trades_proposed"]
+        if total > 0:
+            return {
+                **self.risk_stats,
+                "approval_rate": self.risk_stats["total_trades_approved"] / total,
+                "modification_rate": self.risk_stats["total_trades_modified"] / total,
+                "block_rate": self.risk_stats["total_trades_blocked"] / total,
+            }
+        return self.risk_stats
+
     def clear_history(self):
         """Clear history."""
         self.decision_history = []
         self.prev_rp_weights = {}
+        self.risk_stats = {
+            "total_trades_proposed": 0,
+            "total_trades_approved": 0,
+            "total_trades_modified": 0,
+            "total_trades_blocked": 0,
+        }
 
 
 # Patch TradingStrategyAgent to support risk parity weights
@@ -493,7 +608,7 @@ TradingStrategyAgent.make_trading_decision_with_rp = make_trading_decision_with_
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run risk parity + agent demo backtest"
+        description="Run risk parity + risk management agent demo backtest"
     )
     parser.add_argument("--track", choices=["macro", "sector"], default="sector")
     parser.add_argument("--model", default="deepseek-v4-flash")
@@ -506,6 +621,10 @@ def parse_args():
     parser.add_argument("--history-days", type=int, default=5)
     parser.add_argument("--vol-lookback", type=int, default=60,
                         help="Days to look back for volatility calculation in risk parity")
+    parser.add_argument("--min-holding-days", type=int, default=7,
+                        help="Minimum holding period in days")
+    parser.add_argument("--max-concentration", type=float, default=0.4,
+                        help="Maximum position concentration (0.0-1.0)")
     parser.add_argument("--username", default=AGENT_PLATFORM["AGENT_USERNAME"])
     parser.add_argument("--password", default=AGENT_PLATFORM["AGENT_PASSWORD"])
     parser.add_argument("--base-url", default=AGENT_PLATFORM["BASE_URL"])
@@ -517,9 +636,9 @@ def parse_args():
 def build_config(args):
     fund_pool = MAJOR_FUND_POOL if args.track == "macro" else INDUSTRY_FUND_POOL
     default_results_dir = (
-        "backtest_results_macro_rp_agent"
+        "backtest_results_macro_rp_mgmt_agent"
         if args.track == "macro"
-        else "backtest_results_sector_rp_agent"
+        else "backtest_results_sector_rp_mgmt_agent"
     )
     return {
         "start_date": args.start_date,
@@ -542,7 +661,7 @@ def build_output_path(args, session_id):
         return Path(args.output)
     out_dir = Path(project_root) / "agent_platform" / "demo_outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    return out_dir / f"rp_agent_{args.track}_{args.model}_{session_id}.json"
+    return out_dir / f"rp_mgmt_agent_{args.track}_{args.model}_{session_id}.json"
 
 
 async def run_demo_backtest(args):
@@ -576,12 +695,18 @@ async def run_demo_backtest(args):
             f"Risk parity calculations may be unreliable until sufficient data accumulates."
         )
 
-    agent = RiskParityTradingAgent(
-        agent_id=f"{args.track}_rp_agent",
+    agent = RiskParityWithManagementAgent(
+        agent_id=f"{args.track}_rp_mgmt_agent",
         trading_prompt_template=RISK_PARITY_TRADING_PROMPT,
         decision_model_name=args.model,
         vol_lookback=args.vol_lookback,
+        min_holding_days=args.min_holding_days,
+        max_position_concentration=args.max_concentration,
     )
+
+    logger.info(f"Risk Management Settings:")
+    logger.info(f"  - Min holding period: {args.min_holding_days} days")
+    logger.info(f"  - Max position concentration: {args.max_concentration:.0%}")
 
     start_response = client.start_backtest(config)
     session_id = start_response["session_id"]
@@ -640,7 +765,7 @@ async def run_demo_backtest(args):
 
             final_decision = decision_result["final_decision"]
             trades = [
-                trade
+                _clean_trade_for_server(trade)
                 for trade in final_decision.get("trades", [])
                 if trade.get("action") != "hold"
             ]
@@ -657,6 +782,13 @@ async def run_demo_backtest(args):
                 rp_weights = decision_result["intermediate_results"].get("rp_weights", {})
                 logger.info(f"  RP基准权重: {json.dumps(rp_weights, ensure_ascii=False)}")
 
+                # Log risk management info
+                risk_mgmt = final_decision.get("risk_management", {})
+                if risk_mgmt:
+                    logger.info(f"  风控: 批准{risk_mgmt.get('approved', 0)} "
+                              f"调整{risk_mgmt.get('modified', 0)} "
+                              f"阻止{risk_mgmt.get('blocked', 0)}")
+
         except Exception as exc:
             logger.error(f"Decision failed on {data.get('date')}: {exc}")
             logger.error(traceback.format_exc())
@@ -669,17 +801,27 @@ async def run_demo_backtest(args):
 
     final_results = client.get_backtest_results(session_id)
 
-    # Add decision history to results
+    # Add decision history and risk statistics to results
     final_results["decision_history"] = agent.get_decision_history()
+    final_results["risk_statistics"] = agent.get_risk_statistics()
 
     output_path = build_output_path(args, session_id)
     with output_path.open("w", encoding="utf-8") as handle:
         json.dump(final_results, handle, indent=2, ensure_ascii=False)
 
+    risk_stats = agent.get_risk_statistics()
     logger.info(
         f"Finished session {session_id} after {trading_days} trading days. "
         f"Return={final_results.get('performance', {}).get('total_return', 0) * 100:.2f}%"
     )
+    logger.info(f"Risk Management Statistics:")
+    logger.info(f"  - Proposed: {risk_stats.get('total_trades_proposed', 0)}")
+    logger.info(f"  - Approved: {risk_stats.get('total_trades_approved', 0)} "
+               f"({risk_stats.get('approval_rate', 0)*100:.1f}%)")
+    logger.info(f"  - Modified: {risk_stats.get('total_trades_modified', 0)} "
+               f"({risk_stats.get('modification_rate', 0)*100:.1f}%)")
+    logger.info(f"  - Blocked: {risk_stats.get('total_trades_blocked', 0)} "
+               f"({risk_stats.get('block_rate', 0)*100:.1f}%)")
     logger.info(f"Saved final results to {output_path}")
 
 
@@ -687,12 +829,13 @@ def main():
     args = parse_args()
     log_dir = Path(project_root) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"demo_backtest_rp_agent_{time.strftime('%Y%m%d-%H%M%S')}.log"
+    log_path = log_dir / f"demo_rp_mgmt_agent_{time.strftime('%Y%m%d-%H%M%S')}.log"
     logger.add(str(log_path), level="INFO")
 
     logger.info(
-        f"Running risk parity + agent demo backtest with track={args.track}, model={args.model}, "
-        f"period={args.start_date}~{args.end_date}, vol_lookback={args.vol_lookback}"
+        f"Running risk parity + risk management agent demo backtest with track={args.track}, model={args.model}, "
+        f"period={args.start_date}~{args.end_date}, vol_lookback={args.vol_lookback}, "
+        f"min_holding_days={args.min_holding_days}"
     )
     try:
         asyncio.run(run_demo_backtest(args))

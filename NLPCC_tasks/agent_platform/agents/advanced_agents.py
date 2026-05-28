@@ -23,7 +23,11 @@ sys.path.insert(0, project_root)
 from agent_platform.utils import CustomJsonOutputParser
 
 from .fund_info import FUND_INFO
-from .trading_strategy_prompt import BASELINE_TRADING_PROMPT, NONEWS_TRADING_PROMPT
+from .trading_strategy_prompt import (
+    BASELINE_TRADING_PROMPT,
+    NONEWS_TRADING_PROMPT,
+    RISK_MANAGEMENT_PROMPT,
+)
 
 # 全局缓存变量
 GLOBAL_NEWS_CACHE = {}
@@ -627,6 +631,448 @@ class AdvancedTradingAgent:
     def clear_history(self):
         """清空历史记录"""
         self.decision_history = []
+
+
+class TradeHistoryTracker:
+    """Track trading history and position P&L for risk management."""
+
+    def __init__(self):
+        self.trades_by_fund = {}  # fund_id -> list of trade records
+        self.position_tracker = {}  # fund_id -> {entry_date, entry_value, current_value, shares}
+        self.daily_pnl = {}  # date -> total_pnl
+
+    def record_trade(self, fund_id: str, action: str, amount: float, date: str,
+                     price: float = None, percentage: float = None):
+        """Record a trade execution."""
+        if fund_id not in self.trades_by_fund:
+            self.trades_by_fund[fund_id] = []
+
+        trade_record = {
+            "date": date,
+            "action": action,
+            "amount": amount,
+            "price": price,
+            "percentage": percentage,
+        }
+        self.trades_by_fund[fund_id].append(trade_record)
+
+        # Update position tracker for buy trades
+        if action == "buy" and price:
+            self.position_tracker[fund_id] = {
+                "entry_date": date,
+                "entry_value": amount,
+                "entry_price": price,
+                "current_value": amount,
+            }
+        elif action == "sell" and percentage is not None:
+            # For sells, we update entry date if fully sold or adjust if partial
+            if fund_id in self.position_tracker:
+                if percentage >= 0.99:  # Essentially full sell
+                    del self.position_tracker[fund_id]
+                # Partial sell keeps the original entry date
+
+    def update_position_value(self, fund_id: str, current_value: float, current_price: float):
+        """Update current position value for P&L calculation."""
+        if fund_id in self.position_tracker:
+            self.position_tracker[fund_id]["current_value"] = current_value
+            self.position_tracker[fund_id]["current_price"] = current_price
+
+    def get_holding_days(self, fund_id: str, current_date: str) -> int:
+        """Get days held for current position."""
+        if fund_id not in self.position_tracker:
+            return 0
+
+        entry_date_str = self.position_tracker[fund_id]["entry_date"]
+        try:
+            from datetime import datetime
+            entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d")
+            curr_date = datetime.strptime(current_date, "%Y-%m-%d")
+            return (curr_date - entry_date).days
+        except Exception:
+            return 0
+
+    def get_pnl_percentage(self, fund_id: str) -> float:
+        """Calculate unrealized P&L percentage."""
+        if fund_id not in self.position_tracker:
+            return 0.0
+
+        pos = self.position_tracker[fund_id]
+        if pos.get("entry_value", 0) > 0:
+            return (pos["current_value"] - pos["entry_value"]) / pos["entry_value"]
+        return 0.0
+
+    def get_trades_for_fund(self, fund_id: str) -> List[Dict]:
+        """Get all trades for a specific fund."""
+        return self.trades_by_fund.get(fund_id, [])
+
+    def get_last_trade_date(self, fund_id: str) -> str:
+        """Get the date of the last trade for a fund."""
+        trades = self.trades_by_fund.get(fund_id, [])
+        if trades:
+            return trades[-1]["date"]
+        return None
+
+    def get_all_positions_pnl(self, current_date: str = None) -> List[Dict]:
+        """Get P&L for all current positions."""
+        result = []
+        for fund_id in self.position_tracker.keys():
+            pnl_pct = self.get_pnl_percentage(fund_id)
+            holding_days = 0
+            if current_date:
+                holding_days = self.get_holding_days(fund_id, current_date)
+
+            pos = self.position_tracker[fund_id]
+            result.append({
+                "fund_id": fund_id,
+                "pnl_percentage": pnl_pct,
+                "holding_days": holding_days,
+                "current_value": pos.get("current_value", 0),
+            })
+        return result
+
+
+class RiskManagementAgent:
+    """Risk Management Agent - Enforces trading rules and manages portfolio risk.
+
+    Uses a hybrid approach:
+    - Rule-based for clear violations (holding period, daily loss limits)
+    - LLM-based for complex decisions (trade size adjustments, exception handling)
+    """
+
+    def __init__(
+        self,
+        model_name: str = "deepseek-v4-pro",
+        min_holding_days: int = 7,
+        daily_loss_limit: float = 0.05,  # 5% daily loss limit
+        max_position_concentration: float = 0.4,  # 40% max single position
+        prompt_template: str = None,
+    ):
+        self.llm = ChatOpenAI(
+            base_url=os.getenv("OPENAI_API_BASE"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model=model_name,
+            temperature=0.1,
+        )
+        self.parser = CustomJsonOutputParser()
+        self.min_holding_days = min_holding_days
+        self.daily_loss_limit = daily_loss_limit
+        self.max_position_concentration = max_position_concentration
+        self.prompt_template = prompt_template or RISK_MANAGEMENT_PROMPT
+        self.history_tracker = TradeHistoryTracker()
+
+        # Track portfolio value history for drawdown calculation
+        self.portfolio_value_history = []
+
+    def _clean_trade_for_server(self, trade: Dict) -> Dict:
+        """Clean trade dict to match server validation requirements.
+
+        Server requires:
+        - buy: amount must be set, percentage must be None/not present
+        - sell: percentage must be set, amount must be None/not present
+        """
+        action = trade.get("action", "")
+        cleaned = {
+            "fund_id": trade.get("fund_id"),
+            "action": action,
+        }
+
+        if action == "buy":
+            cleaned["amount"] = trade.get("amount", 0)
+            cleaned["reason"] = trade.get("reason", "")
+        elif action == "sell":
+            cleaned["percentage"] = trade.get("percentage", 0)
+            cleaned["reason"] = trade.get("reason", "")
+        elif action == "hold":
+            cleaned["reason"] = trade.get("reason", "")
+            if "amount" in trade:
+                cleaned["amount"] = trade["amount"]
+            if "percentage" in trade:
+                cleaned["percentage"] = trade["percentage"]
+
+        return cleaned
+
+    async def evaluate_trades(
+        self,
+        proposed_trades: List[Dict],
+        current_portfolio: Dict,
+        sentiment_analysis: Dict,
+        current_date: str,
+        current_rp_weights: Dict = None,
+    ) -> Dict:
+        """Evaluate and potentially modify proposed trades based on risk rules.
+
+        Returns:
+            dict with:
+                - approved_trades: list of approved trades
+                - modified_trades: list of modified trades with reasons
+                - blocked_trades: list of blocked trades with reasons
+                - risk_summary: summary of risk assessment
+        """
+        logger.info(f"🛡️ [风险管理] 开始评估 {len(proposed_trades)} 个拟交易...")
+
+        approved_trades = []
+        modified_trades = []
+        blocked_trades = []
+
+        # Update position tracker with current portfolio values
+        holdings = current_portfolio.get("holdings", {})
+        for fund_id, details in holdings.items():
+            self.history_tracker.update_position_value(
+                fund_id, details.get("value", 0), details.get("price", 0)
+            )
+
+        # Track portfolio value for drawdown
+        total_value = current_portfolio.get("total_value", 0)
+        self.portfolio_value_history.append({"date": current_date, "value": total_value})
+
+        # Rule-based layer (fast path)
+        for trade in proposed_trades:
+            fund_id = trade.get("fund_id")
+            action = trade.get("action")
+
+            if action == "hold":
+                continue
+
+            # Check 1: Minimum holding period for sells
+            if action == "sell":
+                holding_days = self.history_tracker.get_holding_days(fund_id, current_date)
+                if holding_days < self.min_holding_days:
+                    # Check for negative sentiment exception
+                    fund_sentiment = sentiment_analysis.get("fund_analysis", {}).get(fund_id, {})
+                    sentiment = fund_sentiment.get("sentiment", "neutral")
+
+                    if sentiment != "negative":
+                        # Block the sell due to minimum holding period
+                        blocked_trades.append({
+                            "fund_id": fund_id,
+                            "action": action,
+                            "reason": f"持有仅{holding_days}天，未达到最小持有期{self.min_holding_days}天",
+                            "holding_days": holding_days,
+                            "min_holding_days": self.min_holding_days,
+                        })
+                        logger.info(f"  🛡️ 阻止卖出 {fund_id}: 持有{holding_days}天 < {self.min_holding_days}天")
+                        continue
+
+            # Check 2: Position concentration for buys
+            if action == "buy":
+                current_holding = holdings.get(fund_id, {}).get("value", 0)
+                proposed_amount = trade.get("amount", 0)
+                new_value = current_holding + proposed_amount
+                if total_value > 0 and new_value / total_value > self.max_position_concentration:
+                    # Modify trade to respect concentration limit
+                    max_allowed = total_value * self.max_position_concentration - current_holding
+                    if max_allowed > 0:
+                        original_amount = proposed_amount
+                        trade["amount"] = min(proposed_amount, max_allowed)
+                        modified_trades.append({
+                            "fund_id": fund_id,
+                            "original_action": "buy",
+                            "original_amount": original_amount,
+                            "new_action": "buy",
+                            "new_amount": trade["amount"],
+                            "reason": f"单一持仓超过{self.max_position_concentration:.0%}限制",
+                        })
+                        logger.info(f"  🛡️ 调整买入 {fund_id}: {original_amount:.0f} -> {trade['amount']:.0f}")
+                    else:
+                        blocked_trades.append({
+                            "fund_id": fund_id,
+                            "action": action,
+                            "reason": f"当前持仓已达到{self.max_position_concentration:.0%}集中度限制",
+                        })
+                        logger.info(f"  🛡️ 阻止买入 {fund_id}: 超过集中度限制")
+                        continue
+
+            approved_trades.append(trade)
+
+        # LLM-based layer for complex decisions
+        if approved_trades or modified_trades:
+            llm_adjustment = await self._llm_risk_adjustment(
+                approved_trades,
+                modified_trades,
+                current_portfolio,
+                sentiment_analysis,
+                current_date,
+                current_rp_weights,
+            )
+            if llm_adjustment.get("adjusted_trades"):
+                # Clean the LLM-returned trades to match server format
+                approved_trades = [
+                    self._clean_trade_for_server(t)
+                    for t in llm_adjustment["adjusted_trades"]
+                ]
+            if llm_adjustment.get("risk_summary"):
+                risk_summary = llm_adjustment["risk_summary"]
+            else:
+                risk_summary = self._generate_risk_summary(
+                    approved_trades, modified_trades, blocked_trades
+                )
+        else:
+            risk_summary = self._generate_risk_summary(
+                approved_trades, modified_trades, blocked_trades
+            )
+
+        # Record approved trades (clean format for tracker)
+        for trade in approved_trades:
+            fund_id = trade.get("fund_id")
+            action = trade.get("action")
+            if action == "buy":
+                self.history_tracker.record_trade(
+                    fund_id, action, trade.get("amount", 0), current_date
+                )
+            elif action == "sell":
+                self.history_tracker.record_trade(
+                    fund_id, action, 0, current_date, percentage=trade.get("percentage", 0)
+                )
+
+        return {
+            "approved_trades": approved_trades,
+            "modified_trades": modified_trades,
+            "blocked_trades": blocked_trades,
+            "risk_summary": risk_summary,
+        }
+
+    async def _llm_risk_adjustment(
+        self,
+        approved_trades: List[Dict],
+        modified_trades: List[Dict],
+        current_portfolio: Dict,
+        sentiment_analysis: Dict,
+        current_date: str,
+        current_rp_weights: Dict = None,
+    ) -> Dict:
+        """Use LLM for complex risk decisions using RISK_MANAGEMENT_PROMPT template."""
+
+        holdings = current_portfolio.get("holdings", {})
+        capital = current_portfolio.get("capital", 0)
+        total_value = current_portfolio.get("total_value", 0)
+
+        # Format holdings text
+        holdings_text = "\n".join([
+            f"- {fund_id}: 持仓价值 {details['value']:.2f} 元 (当前价: {details['price']:.2f})"
+            for fund_id, details in holdings.items()
+        ]) if holdings else "  (空仓)"
+
+        # Format proposed trades
+        proposed_trades = approved_trades + modified_trades
+        trades_text = json.dumps(proposed_trades, ensure_ascii=False, indent=2)
+
+        # Format trading history from tracker
+        trading_history_list = []
+        for fund_id in list(self.history_tracker.trades_by_fund.keys())[:10]:  # Last 10 funds
+            trades = self.history_tracker.get_trades_for_fund(fund_id)
+            if trades:
+                last_trade = trades[-1]
+                trading_history_list.append(
+                    f"{last_trade['date']} {fund_id} {last_trade['action']} "
+                    f"amount:{last_trade.get('amount', 0)} "
+                    f"percentage:{last_trade.get('percentage', 0)}"
+                )
+        trading_history = "\n".join(trading_history_list) if trading_history_list else "  (无交易历史)"
+
+        # Format sentiment analysis
+        sentiment_text = json.dumps(
+            sentiment_analysis.get('fund_analysis', {}),
+            ensure_ascii=False,
+            indent=2
+        )
+
+        # Calculate max drawdown
+        max_drawdown = self._calculate_max_drawdown()
+
+        # Format position P&L
+        position_pnl_list = []
+        all_pnl = self.history_tracker.get_all_positions_pnl()
+        for pnl_info in all_pnl:
+            fund_id = pnl_info["fund_id"]
+            pnl_pct = pnl_info["pnl_percentage"]
+            holding_days = pnl_info["holding_days"]
+            position_pnl_list.append(
+                f"- {fund_id}: P&L {pnl_pct:.2%}, 持有{holding_days}天"
+            )
+        position_pnl = "\n".join(position_pnl_list) if position_pnl_list else "  (无持仓)"
+
+        # Build prompt using template
+        # Note: Pass raw float values for template formatting
+        prompt = self.prompt_template.format(
+            current_date=current_date,
+            total_value=total_value,
+            capital=capital,
+            holdings_text=holdings_text,
+            proposed_trades=trades_text,
+            trading_history=trading_history,
+            sentiment_analysis=sentiment_text,
+            max_drawdown=max_drawdown,  # Pass raw float, template formats it
+            min_holding_days=self.min_holding_days,
+            max_concentration=self.max_position_concentration,  # Pass raw float
+            daily_loss_limit=self.daily_loss_limit,  # Pass raw float
+            position_pnl=position_pnl,
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm.ainvoke(prompt, response_format={"type": "json_object"}),
+                timeout=60
+            )
+            result = json.loads(response.content)
+            logger.info(f"  🛡️ LLM风险评估: {result.get('risk_level', 'unknown')}")
+            return result
+        except Exception as e:
+            logger.warning(f"LLM风险评估失败: {e}")
+            return {"adjusted_trades": approved_trades, "risk_summary": "规则基础风险评估"}
+
+    def _calculate_max_drawdown(self) -> float:
+        """Calculate current maximum drawdown."""
+        if len(self.portfolio_value_history) < 2:
+            return 0.0
+
+        values = [h["value"] for h in self.portfolio_value_history]
+        peak = max(values)
+        current = values[-1]
+        if peak > 0:
+            return (peak - current) / peak
+        return 0.0
+
+    def _generate_risk_summary(
+        self, approved: List[Dict], modified: List[Dict], blocked: List[Dict]
+    ) -> str:
+        """Generate a text summary of risk assessment."""
+        parts = []
+        if approved:
+            parts.append(f"批准{len(approved)}笔交易")
+        if modified:
+            parts.append(f"调整{len(modified)}笔交易")
+        if blocked:
+            parts.append(f"阻止{len(blocked)}笔交易")
+
+        summary = ", ".join(parts) if parts else "无交易"
+        summary += f" | 最大回撤: {self._calculate_max_drawdown():.2%}"
+        return summary
+
+    def get_position_pnl(self, fund_id: str) -> Dict:
+        """Get P&L information for a position."""
+        pnl_pct = self.history_tracker.get_pnl_percentage(fund_id)
+        holding_days = 0
+        if fund_id in self.history_tracker.position_tracker:
+            holding_days = self.history_tracker.get_holding_days(
+                fund_id,
+                self.history_tracker.position_tracker[fund_id].get("current_date", "")
+            )
+
+        return {
+            "fund_id": fund_id,
+            "pnl_percentage": pnl_pct,
+            "holding_days": holding_days,
+            "current_value": self.history_tracker.position_tracker.get(fund_id, {}).get(
+                "current_value", 0
+            ),
+        }
+
+    def get_all_positions_pnl(self) -> List[Dict]:
+        """Get P&L for all current positions."""
+        return [
+            self.get_position_pnl(fund_id)
+            for fund_id in self.history_tracker.position_tracker.keys()
+        ]
 
 
 class SillyTradingAgent:

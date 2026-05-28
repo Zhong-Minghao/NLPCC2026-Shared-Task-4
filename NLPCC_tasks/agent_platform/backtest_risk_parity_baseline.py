@@ -621,7 +621,7 @@ def parse_args():
     )
     parser.add_argument("--track", choices=["macro", "sector"], default="sector")
     parser.add_argument("--start-date", default="2025-01-02")
-    parser.add_argument("--end-date", default="2025-12-31")
+    parser.add_argument("--end-date", default="2025-01-31")
     parser.add_argument("--initial-capital", type=float, default=100000)
     parser.add_argument("--lookback-days", type=int, default=30)
     parser.add_argument("--pre-k-days", type=int, default=1)
