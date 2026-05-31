@@ -657,11 +657,11 @@ class TradeHistoryTracker:
         self.trades_by_fund[fund_id].append(trade_record)
 
         # Update position tracker for buy trades
-        if action == "buy" and price:
+        if action == "buy":
             self.position_tracker[fund_id] = {
                 "entry_date": date,
                 "entry_value": amount,
-                "entry_price": price,
+                "entry_price": price or 0,
                 "current_value": amount,
             }
         elif action == "sell" and percentage is not None:
@@ -916,8 +916,9 @@ class RiskManagementAgent:
             fund_id = trade.get("fund_id")
             action = trade.get("action")
             if action == "buy":
+                price = holdings.get(fund_id, {}).get("price", None)
                 self.history_tracker.record_trade(
-                    fund_id, action, trade.get("amount", 0), current_date
+                    fund_id, action, trade.get("amount", 0), current_date, price=price
                 )
             elif action == "sell":
                 self.history_tracker.record_trade(
