@@ -103,11 +103,6 @@ TECH_FACTOR_INFO = {
         "meaning": "上一交易日行业换手率，相对于全市场所有行业的均值与标准差，计算Z-score： (x - mean)/std。",
         "interpretation": "Z-score > 1.5 代表交易极度拥挤，后续踩踏风险高，应主动规避；Z-score < -1 代表无人问津，但可能左侧布局。拥挤度因子不用于优选，只用于剔除过热行业，能显著改善动量策略回撤。",
     },
-    "dde_net_buy_10d_pct": {
-        "name": "10日大单净买入占比",
-        "meaning": "最近10个已完成交易日的大单（通常为单笔成交额>20万元）净买入额，占同期流通市值的百分比。",
-        "interpretation": "正值代表主力资金持续流入，负值代表流出。大单净买入与行业未来1个月超额收益正相关，尤其在机构定价主导的行业中更为有效。注意财报季前后可能存在失真。",
-    },
     "bollinger_width_pct": {
         "name": "布林带宽度",
         "meaning": "布林带（参数20,2）的上轨减下轨，再除以中轨得到的百分比，即 (upper - lower)/middle * 100。",
@@ -347,10 +342,24 @@ class TechnicalFactorCalculator:
 
     def calculate_for_funds(self, fund_ids: List[str], current_date: Any) -> Dict[str, Dict[str, Any]]:
         date_int = _date_to_int(current_date)
-        return {
-            fund_id: self.calculate_one(fund_id, date_int)
-            for fund_id in fund_ids
-        }
+        results = {fund_id: self.calculate_one(fund_id, date_int) for fund_id in fund_ids}
+
+        # Cross-sectional turnover z-score: pop the raw amount proxy and normalize
+        raw_amounts: Dict[str, float] = {}
+        for fid, res in results.items():
+            raw = res["factors"].pop("_amount_raw", None)
+            if raw is not None:
+                raw_amounts[fid] = raw
+
+        if len(raw_amounts) >= 2:
+            vals = list(raw_amounts.values())
+            mean_a = sum(vals) / len(vals)
+            std_a = (sum((v - mean_a) ** 2 for v in vals) / len(vals)) ** 0.5
+            for fid, raw in raw_amounts.items():
+                if std_a > 0:
+                    results[fid]["factors"]["turnover_zscore"] = round((raw - mean_a) / std_a, 4)
+
+        return results
 
     def calculate_one(self, fund_id: str, current_date: int) -> Dict[str, Any]:
         frame = self._load_price_df(fund_id)
@@ -361,61 +370,90 @@ class TechnicalFactorCalculator:
         if completed.empty:
             return self._empty_result(fund_id, current_date)
 
-        current_row = None
-        if current_date in frame.index:
-            current_row = frame.loc[current_date]
-            if isinstance(current_row, pd.DataFrame):
-                current_row = current_row.iloc[0]
+        recent_60 = completed.tail(60)
+        recent_20 = completed.tail(20)
+        _empty_s: pd.Series = pd.Series(dtype=float)
 
-        recent = completed.tail(max(self.long_window, self.medium_window, self.short_window))
-        closes = pd.to_numeric(recent.get("close"), errors="coerce").dropna()
-        pct_changes = pd.to_numeric(recent.get("pctchange"), errors="coerce").dropna()
-        highs = pd.to_numeric(recent.get("high"), errors="coerce")
-        lows = pd.to_numeric(recent.get("low"), errors="coerce")
-        volumes = pd.to_numeric(recent.get("volume"), errors="coerce").dropna()
+        closes_all = pd.to_numeric(completed.get("close", _empty_s), errors="coerce").dropna()
+        pct_all = pd.to_numeric(completed.get("pctchange", _empty_s), errors="coerce").dropna()
+        closes_20 = pd.to_numeric(recent_20.get("close", _empty_s), errors="coerce").dropna()
+        pct_20 = pd.to_numeric(recent_20.get("pctchange", _empty_s), errors="coerce").dropna()
+        amounts_60 = pd.to_numeric(recent_60.get("amount", _empty_s), errors="coerce").dropna()
 
-        prev_close = _safe_float(closes.iloc[-1]) if not closes.empty else None
-        current_open = _safe_float(current_row.get("open")) if current_row is not None else None
+        # 1. momentum_60d_pct: 60-day cumulative return
+        momentum_60d = _cumulative_return(pct_all, 60)
 
-        ma_short = _safe_float(closes.tail(self.short_window).mean()) if len(closes) >= self.short_window else None
-        ma_long = _safe_float(closes.tail(self.long_window).mean()) if len(closes) >= self.long_window else None
+        # 2. momentum_term_spread_pct: cumret(60) - cumret(10)
+        cumret_10 = _cumulative_return(pct_all, 10)
+        term_spread = (
+            momentum_60d - cumret_10
+            if momentum_60d is not None and cumret_10 is not None
+            else None
+        )
 
-        vol_values = pct_changes.tail(self.medium_window)
-        volatility = _safe_float(vol_values.std(ddof=0)) if len(vol_values) >= self.medium_window else None
+        # 3. rsi_20d: simple-average RSI — avg_gain / (avg_gain + avg_loss) * 100
+        rsi_20 = None
+        if len(pct_20) >= 20:
+            gains = pct_20[pct_20 > 0]
+            losses = pct_20[pct_20 < 0]
+            avg_gain = float(gains.mean()) if not gains.empty else 0.0
+            avg_loss = abs(float(losses.mean())) if not losses.empty else 0.0
+            total = avg_gain + avg_loss
+            if total > 0:
+                rsi_20 = avg_gain / total * 100
 
-        drawdown = None
-        long_closes = closes.tail(self.long_window)
-        if len(long_closes) >= self.long_window and prev_close is not None:
-            high_close = _safe_float(long_closes.max())
-            drawdown = _pct(prev_close, high_close)
+        # 4. bias_20d_pct: (close / MA20 - 1) * 100
+        bias_20d = None
+        if len(closes_20) >= 20:
+            ma20 = float(closes_20.mean())
+            prev_close = _safe_float(closes_20.iloc[-1])
+            if prev_close is not None and ma20 != 0:
+                bias_20d = (prev_close / ma20 - 1) * 100
 
-        volume_ratio = None
-        recent_volumes = volumes.tail(self.short_window)
-        if len(recent_volumes) >= self.short_window:
-            prev_volume = _safe_float(recent_volumes.iloc[-1])
-            avg_volume = _safe_float(recent_volumes.mean())
-            if prev_volume is not None and avg_volume not in (None, 0):
-                volume_ratio = prev_volume / avg_volume
+        # 5. amount_volatility_60d: negate std so higher = more stable
+        amount_vol = None
+        if len(amounts_60) >= 60:
+            amount_vol = -float(amounts_60.std(ddof=0))
 
-        range_5d = None
-        if len(recent) >= self.short_window:
-            ranges = ((highs - lows) / pd.to_numeric(recent.get("close"), errors="coerce") * 100).dropna()
-            range_tail = ranges.tail(self.short_window)
-            if len(range_tail) >= self.short_window:
-                range_5d = _safe_float(range_tail.mean())
+        # 6. volume_price_cov_rank: Spearman rank corr(close, volume) over 20 days
+        vp_corr = None
+        c_20 = pd.to_numeric(recent_20.get("close", _empty_s), errors="coerce")
+        v_20 = pd.to_numeric(recent_20.get("volume", _empty_s), errors="coerce")
+        df_cv = pd.DataFrame({"c": c_20, "v": v_20}).dropna()
+        if len(df_cv) >= 20:
+            vp_corr = _safe_float(df_cv["c"].rank().corr(df_cv["v"].rank()))
 
-        
+        # 7. turnover_zscore: cross-sectional, computed in calculate_for_funds
+        last_amount_raw = _safe_float(amounts_60.iloc[-1]) if not amounts_60.empty else None
+
+        # 8. bollinger_width_pct: (upper - lower) / middle * 100 = (4 * std20 / MA20) * 100
+        boll_width = None
+        if len(closes_20) >= 20:
+            ma20 = float(closes_20.mean())
+            std20 = float(closes_20.std(ddof=0))
+            if ma20 != 0:
+                boll_width = 4 * std20 / ma20 * 100
+
+        # 9. macd_histogram: MACD(12,26,9), uses all completed closes for better EMA accuracy
+        macd_hist = None
+        if len(closes_all) >= 35:
+            ema12 = closes_all.ewm(span=12, adjust=False).mean()
+            ema26 = closes_all.ewm(span=26, adjust=False).mean()
+            dif = ema12 - ema26
+            dea = dif.ewm(span=9, adjust=False).mean()
+            macd_hist = _safe_float(((dif - dea) * 2).iloc[-1])
+
         factors = {
-            "momentum_60d_pct": _round_or_none(_pct(current_open, prev_close)),
-            "momentum_term_spread_pct": _round_or_none(_safe_float(pct_changes.iloc[-1]) if not pct_changes.empty else None),
-            "rsi_20d": _round_or_none(_cumulative_return(pct_changes, self.short_window)),
-            "bias_20d_pct": _round_or_none(_cumulative_return(pct_changes, self.long_window)),
-            "amount_volatility_60d": _round_or_none(_pct(prev_close, ma_short)),
-            "volume_price_cov_rank": _round_or_none(_pct(prev_close, ma_long)),
-            "turnover_zscore": _round_or_none(volatility),
-            "dde_net_buy_10d_pct": _round_or_none(drawdown),
-            "bollinger_width_pct": _round_or_none(volume_ratio),
-            "macd_histogram": _round_or_none(range_5d),
+            "momentum_60d_pct": _round_or_none(momentum_60d),
+            "momentum_term_spread_pct": _round_or_none(term_spread),
+            "rsi_20d": _round_or_none(rsi_20),
+            "bias_20d_pct": _round_or_none(bias_20d),
+            "amount_volatility_60d": _round_or_none(amount_vol),
+            "volume_price_cov_rank": _round_or_none(vp_corr),
+            "turnover_zscore": None,
+            "bollinger_width_pct": _round_or_none(boll_width),
+            "macd_histogram": _round_or_none(macd_hist),
+            "_amount_raw": last_amount_raw,
         }
 
         return {

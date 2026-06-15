@@ -27,6 +27,15 @@ from .trading_strategy_prompt import (
     BASELINE_TRADING_PROMPT,
     NONEWS_TRADING_PROMPT,
     RISK_MANAGEMENT_PROMPT,
+    RISK_CONCERNS_PROMPT,
+    CONSENSUS_SUMMARY_PROMPT,
+)
+from agent_platform.agents.discussion_types import (
+    ConsensusResult,
+    DiscussionContext,
+    DiscussionRound,
+    PositionStatement,
+    RiskConcerns,
 )
 
 # 全局缓存变量
@@ -1074,6 +1083,327 @@ class RiskManagementAgent:
             self.get_position_pnl(fund_id)
             for fund_id in self.history_tracker.position_tracker.keys()
         ]
+
+    # ------------------------------------------------------------------ #
+    #  Discussion-mode methods (committee deliberation)                   #
+    # ------------------------------------------------------------------ #
+
+    def _apply_rule_based_checks(
+        self,
+        proposed_trades: List[Dict],
+        current_portfolio: Dict,
+        sentiment_analysis: Dict,
+        current_date: str,
+    ):
+        """
+        Apply hard trading rules and return (hard_blocks, soft_concerns).
+
+        hard_blocks: trades that must be blocked (rule violation with no waiver).
+        soft_concerns: trades that can be negotiated (e.g. amount reduction).
+        """
+        holdings = current_portfolio.get("holdings", {})
+        total_value = current_portfolio.get("total_value", 0)
+        hard_blocks = []
+        soft_concerns = []
+
+        for trade in proposed_trades:
+            fund_id = trade.get("fund_id")
+            action = trade.get("action")
+            if action == "hold":
+                continue
+
+            if action == "sell":
+                holding_days = self.history_tracker.get_holding_days(fund_id, current_date)
+                if holding_days < self.min_holding_days:
+                    fund_sentiment = sentiment_analysis.get("fund_analysis", {}).get(fund_id, {})
+                    if fund_sentiment.get("sentiment", "neutral") != "negative":
+                        hard_blocks.append({
+                            "fund_id": fund_id,
+                            "action": action,
+                            "rule": "min_holding_period",
+                            "reason": (
+                                f"持有仅{holding_days}天，未达到最小持有期{self.min_holding_days}天"
+                            ),
+                        })
+
+            if action == "buy":
+                current_holding = holdings.get(fund_id, {}).get("value", 0)
+                proposed_amount = trade.get("amount", 0)
+                new_value = current_holding + proposed_amount
+                if total_value > 0 and new_value / total_value > self.max_position_concentration:
+                    max_allowed = total_value * self.max_position_concentration - current_holding
+                    if max_allowed <= 0:
+                        hard_blocks.append({
+                            "fund_id": fund_id,
+                            "action": action,
+                            "rule": "position_concentration",
+                            "reason": (
+                                f"当前持仓已达到{self.max_position_concentration:.0%}集中度限制"
+                            ),
+                        })
+                    else:
+                        soft_concerns.append({
+                            "fund_id": fund_id,
+                            "action": action,
+                            "concern": (
+                                f"买入后持仓将超过{self.max_position_concentration:.0%}集中度限制"
+                            ),
+                            "suggested_modification": f"建议买入不超过{max_allowed:.0f}元",
+                            "severity": "high",
+                        })
+
+        return hard_blocks, soft_concerns
+
+    async def generate_risk_concerns(
+        self,
+        position_statement: PositionStatement,
+        context: DiscussionContext,
+        discussion_history: List[DiscussionRound],
+    ) -> RiskConcerns:
+        """
+        Generate initial risk concerns for the BL agent's position statement.
+        Layer 1: rule-based hard blocks.
+        Layer 2: LLM-based soft concerns and counter-proposals.
+        """
+        holdings = context.current_portfolio.get("holdings", {})
+        capital = context.current_portfolio.get("capital", 0)
+        total_value = context.current_portfolio.get("total_value", 0)
+
+        for fund_id, details in holdings.items():
+            self.history_tracker.update_position_value(
+                fund_id, details.get("value", 0), details.get("price", 0)
+            )
+        self.portfolio_value_history.append({"date": context.date, "value": total_value})
+
+        hard_blocks, rule_soft = self._apply_rule_based_checks(
+            position_statement.proposed_trades,
+            context.current_portfolio,
+            position_statement.sentiment_analysis,
+            context.date,
+        )
+
+        holdings_text = "\n".join([
+            f"- {fid}: 持仓价值 {d.get('value', 0):.2f} 元"
+            for fid, d in holdings.items()
+        ]) if holdings else "  (空仓)"
+
+        position_statement_text = (
+            f"投资逻辑: {position_statement.reasoning_text}\n"
+            f"拟交易: {json.dumps(position_statement.proposed_trades, ensure_ascii=False)}\n"
+            f"目标权重: {json.dumps({k: f'{v:.2%}' for k, v in position_statement.target_weights.items()}, ensure_ascii=False)}\n"
+            f"预期收益: {position_statement.optimization_metrics.get('expected_return', 0):.4%}, "
+            f"Sharpe: {position_statement.optimization_metrics.get('sharpe_ratio', 0):.4f}"
+        )
+
+        max_drawdown = self._calculate_max_drawdown()
+        all_pnl = self.history_tracker.get_all_positions_pnl(current_date=context.date)
+        pnl_text = "\n".join([
+            f"- {p['fund_id']}: P&L {p['pnl_percentage']:.2%}, 持有{p['holding_days']}天"
+            for p in all_pnl
+        ]) if all_pnl else "  (无持仓)"
+        risk_metrics_text = f"最大回撤: {max_drawdown:.2%}\n持仓P&L:\n{pnl_text}"
+
+        tech_factors = context.technical_factors
+        if tech_factors:
+            tech_text = "\n".join([
+                f"- {fid}: 动量60d={f.get('factors', {}).get('momentum_60d_pct', 'N/A')}, "
+                f"RSI20={f.get('factors', {}).get('rsi_20d', 'N/A')}"
+                for fid, f in list(tech_factors.items())[:5]
+            ])
+        else:
+            tech_text = "  (无技术因子数据)"
+
+        prior_concerns_section = ""
+        if discussion_history:
+            last = discussion_history[-1]
+            prior_concerns_section = (
+                f"\n**上轮风险关切**: {last.risk_concerns.concerns_text[:300]}\n"
+                f"**投资委员会的回应**: {last.position_statement.reasoning_text[:200]}\n"
+                f"**已做出的让步**: {last.position_statement.concessions_made}\n"
+                f"**请评估上述关切是否已被解决，并提出新的关切（如有）**\n"
+            )
+
+        prompt = RISK_CONCERNS_PROMPT.format(
+            min_holding_days=self.min_holding_days,
+            max_concentration=self.max_position_concentration,
+            daily_loss_limit=self.daily_loss_limit,
+            current_date=context.date,
+            max_drawdown=max_drawdown,
+            position_statement_text=position_statement_text,
+            risk_metrics_text=risk_metrics_text,
+            prior_concerns_section=prior_concerns_section,
+            technical_factors_text=tech_text,
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm.ainvoke(prompt, response_format={"type": "json_object"}),
+                timeout=60,
+            )
+            result = json.loads(response.content)
+        except Exception as e:
+            logger.warning(f"风险关切LLM生成失败: {e}")
+            result = {
+                "hard_blocks": [],
+                "soft_concerns": [],
+                "counter_proposal": [],
+                "concerns_text": "规则检查完成，无重大关切",
+                "risk_level": "low",
+                "requirements_for_approval": "无特殊要求",
+            }
+
+        llm_hard = result.get("hard_blocks", [])
+        all_hard_blocks = hard_blocks.copy()
+        for lb in llm_hard:
+            if not any(
+                b["fund_id"] == lb.get("fund_id") and b["action"] == lb.get("action")
+                for b in all_hard_blocks
+            ):
+                all_hard_blocks.append(lb)
+
+        all_soft = rule_soft + result.get("soft_concerns", [])
+
+        return RiskConcerns(
+            hard_blocks=all_hard_blocks,
+            soft_concerns=all_soft,
+            counter_proposal=result.get("counter_proposal", []),
+            concerns_text=result.get("concerns_text", ""),
+            risk_level=result.get("risk_level", "medium"),
+            requirements_for_approval=result.get("requirements_for_approval", ""),
+        )
+
+    async def evaluate_revised_proposal(
+        self,
+        revised_statement: PositionStatement,
+        prior_concerns: RiskConcerns,
+        context: DiscussionContext,
+        discussion_history: List[DiscussionRound],
+    ) -> RiskConcerns:
+        """
+        Evaluate the BL agent's revised proposal.
+        The discussion_history (which now includes the round that produced
+        prior_concerns) provides context for the LLM.
+        """
+        return await self.generate_risk_concerns(
+            position_statement=revised_statement,
+            context=context,
+            discussion_history=discussion_history,
+        )
+
+    async def reach_consensus(
+        self,
+        final_statement: PositionStatement,
+        final_concerns: RiskConcerns,
+        context: DiscussionContext,
+        discussion_history: List[DiscussionRound],
+    ) -> ConsensusResult:
+        """
+        Finalize the discussion: apply remaining hard blocks, accept/modify
+        the rest, and generate a merged consensus narrative.
+        """
+        holdings = context.current_portfolio.get("holdings", {})
+        blocked_keys = {
+            (b.get("fund_id"), b.get("action")) for b in final_concerns.hard_blocks
+        }
+
+        approved = []
+        modified = []
+        blocked = []
+
+        for trade in final_statement.proposed_trades:
+            key = (trade.get("fund_id"), trade.get("action"))
+            if key in blocked_keys:
+                blocked.append(trade)
+                continue
+
+            counter = next(
+                (cp for cp in final_concerns.counter_proposal
+                 if cp.get("fund_id") == trade.get("fund_id")),
+                None,
+            )
+            if counter and (
+                (trade.get("action") == "buy" and counter.get("amount") is not None
+                 and abs(counter.get("amount", trade.get("amount", 0)) - trade.get("amount", 0)) > 1)
+                or
+                (trade.get("action") == "sell" and counter.get("percentage") is not None
+                 and abs(counter.get("percentage", trade.get("percentage", 0)) - trade.get("percentage", 0)) > 0.01)
+            ):
+                merged = {**trade}
+                if counter.get("amount") is not None and trade.get("action") == "buy":
+                    merged["amount"] = counter["amount"]
+                if counter.get("percentage") is not None and trade.get("action") == "sell":
+                    merged["percentage"] = counter["percentage"]
+                merged["reason"] = (
+                    f"{trade.get('reason', '')} [风险调整: {counter.get('reason', '')}]"
+                )
+                modified.append(self._clean_trade_for_server(merged))
+            else:
+                approved.append(self._clean_trade_for_server(trade))
+
+        for trade in approved + modified:
+            fund_id = trade.get("fund_id")
+            action = trade.get("action")
+            if action == "buy":
+                price = holdings.get(fund_id, {}).get("price", None)
+                self.history_tracker.record_trade(
+                    fund_id, action, trade.get("amount", 0), context.date, price=price
+                )
+            elif action == "sell":
+                self.history_tracker.record_trade(
+                    fund_id, action, 0, context.date, percentage=trade.get("percentage", 0)
+                )
+
+        bl_final_thesis = (
+            discussion_history[-1].position_statement.reasoning_text
+            if discussion_history else final_statement.reasoning_text
+        )
+        risk_final_assessment = final_concerns.concerns_text
+
+        discussion_summary = "\n".join([
+            f"第{r.round_number}轮: 关切={r.risk_concerns.concerns_text[:80]}... "
+            f"让步={r.position_statement.concessions_made}"
+            for r in discussion_history[-2:]
+        ])
+        final_trades_text = json.dumps(approved + modified, ensure_ascii=False, indent=2)
+
+        prompt = CONSENSUS_SUMMARY_PROMPT.format(
+            rounds=len(discussion_history),
+            discussion_summary=discussion_summary or "(首轮即达成共识)",
+            final_trades_text=final_trades_text,
+            bl_final_thesis=bl_final_thesis[:300],
+            risk_final_assessment=risk_final_assessment[:300],
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm.ainvoke(prompt, response_format={"type": "json_object"}),
+                timeout=60,
+            )
+            result = json.loads(response.content)
+        except Exception as e:
+            logger.warning(f"共识摘要LLM生成失败: {e}")
+            result = {
+                "consensus_reasoning": f"经过{len(discussion_history)}轮讨论，委员会达成共识",
+                "key_agreements": [],
+                "key_compromises": final_statement.concessions_made,
+                "risk_level": final_concerns.risk_level,
+                "risk_summary": final_concerns.requirements_for_approval,
+            }
+
+        return ConsensusResult(
+            final_trades=approved + modified,
+            approved_trades=approved,
+            modified_trades=modified,
+            blocked_trades=blocked,
+            consensus_reasoning=result.get("consensus_reasoning", ""),
+            bl_final_thesis=bl_final_thesis,
+            risk_final_assessment=risk_final_assessment,
+            discussion_rounds=len(discussion_history),
+            key_agreements=result.get("key_agreements", []),
+            key_compromises=result.get("key_compromises", []),
+            risk_level=result.get("risk_level", final_concerns.risk_level),
+            risk_summary=result.get("risk_summary", ""),
+        )
 
 
 class SillyTradingAgent:

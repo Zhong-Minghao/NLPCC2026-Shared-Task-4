@@ -63,6 +63,7 @@ select:focus{outline:none;border-color:#58a6ff}
 .d-item{padding:9px 12px;cursor:pointer;border-bottom:1px solid #21262d;display:flex;align-items:center;justify-content:space-between;transition:background .12s;user-select:none}
 .d-item:hover{background:#1c2128}
 .d-item.sel{background:#0d2045;border-left:3px solid #58a6ff}
+.d-item.no-dec{opacity:.45}
 .d-item .d-date{font-size:12px;font-family:monospace}
 .d-item .d-ret{font-size:11px;font-family:monospace}
 #dec-detail{background:#161b22;border:1px solid #21262d;border-radius:8px;overflow-y:auto;max-height:calc(100vh - 190px);min-height:400px;padding:16px}
@@ -201,19 +202,10 @@ const activeFunds = new Set();
 // ════════════════════════════════
 // CONSTANTS
 // ════════════════════════════════
-const FACTOR_LABELS = {
-  open_gap_pct:     '开盘跳空%',
-  ret_1d_pct:       '昨日收益%',
-  momentum_5d_pct:  '5日动量%',
-  momentum_20d_pct: '20日动量%',
-  ma5_bias_pct:     '5日均线偏离%',
-  ma20_bias_pct:    '20日均线偏离%',
-  volatility_10d_pct:'10日波动率%',
-  drawdown_20d_pct: '20日回撤%',
-  volume_ratio_5d:  '5日量比',
-  range_5d_pct:     '5日振幅%'
-};
-const FACTOR_KEYS = Object.keys(FACTOR_LABELS);
+// Optional pretty-name overrides for factor keys.
+// All factor keys are derived dynamically from the loaded JSON — add entries here
+// only when you want a custom display label. Unknown keys fall back to the key name.
+const FACTOR_LABELS = {};
 
 // Static fund code → name map (from fund_info.py)
 const FUND_NAMES = {
@@ -285,7 +277,7 @@ function boot(filename) {
 
   // Factor selector
   const sel = document.getElementById('factor-sel');
-  sel.innerHTML = FACTOR_KEYS.map(k => `<option value="${k}">${FACTOR_LABELS[k]}</option>`).join('');
+  sel.innerHTML = PROC.factorKeys.map(k => `<option value="${k}">${FACTOR_LABELS[k]||k}</option>`).join('');
 
   buildFundToggles();
   renderAll();
@@ -295,16 +287,33 @@ function boot(filename) {
 // DATA PROCESSING
 // ════════════════════════════════
 function processData(raw) {
-  // 1. Net value series — last entry per date
-  const dailyValues = lastByDate(raw.portfolio_value_history || []);
+  // 1. Net value series — use after_trade snapshots for correct end-of-day values.
+  // portfolio_value_history is recorded before _update_holdings_value() runs, so it
+  // reflects yesterday's prices, not today's close. after_trade snapshots are written
+  // inside submit_trades() after the price update and trade execution.
+  const dailyValues = (() => {
+    const afterSnaps = (raw.daily_portfolio_snapshots || [])
+      .filter(s => s.snapshot_type === 'after_trade');
+    if (!afterSnaps.length) return lastByDate(raw.portfolio_value_history || []);
+    const m = new Map();
+    afterSnaps.forEach(s => m.set(s.date, { date: s.date, value: s.total_value, cash: s.capital }));
+    // Append any dates from portfolio_value_history that after_trade doesn't cover
+    // (e.g. the final trading day when after_trade snapshot was not written)
+    const lastAfterDate = [...m.keys()].sort().at(-1) || '';
+    lastByDate(raw.portfolio_value_history || [])
+      .filter(v => v.date > lastAfterDate)
+      .forEach(v => m.set(v.date, v));
+    return [...m.values()].sort((a, b) => a.date.localeCompare(b.date));
+  })();
 
   // 2. Daily returns
   const dailyReturns = dailyValues.slice(1).map((v,i) =>
     dailyValues[i].value > 0 ? (v.value - dailyValues[i].value) / dailyValues[i].value : 0
   );
 
-  // 3. Normalized curve
-  const iv = dailyValues[0]?.value || 1e5;
+  // 3. Normalized curve — base on initial capital (portfolio_value_history[0] is recorded
+  // before any trades, so it holds the true starting capital).
+  const iv = (raw.portfolio_value_history || [])[0]?.value || dailyValues[0]?.value || 1e5;
   const portNorm = dailyValues.map(v => ({ date: v.date, value: v.value / iv }));
 
   // 4. Derived stats
@@ -342,10 +351,22 @@ function processData(raw) {
   const decMap = new Map();
   (raw.agent_decisions||[]).forEach(d => decMap.set(d.date, d));
 
-  // 10. Factor matrix
-  const factorMatrix = buildFactorMatrix(raw.agent_decisions||[]);
+  // 10. Factor keys — extracted dynamically from actual data
+  const factorKeys = (() => {
+    const keySet = new Set();
+    (raw.agent_decisions || []).forEach(ad => {
+      const snap = getCore(ad).technical_factors_snapshot || {};
+      Object.values(snap).forEach(info => {
+        Object.keys(info.factors || {}).forEach(k => keySet.add(k));
+      });
+    });
+    return [...keySet].sort();
+  })();
 
-  // 11. Return map for date list coloring
+  // 11. Factor matrix
+  const factorMatrix = buildFactorMatrix(raw.agent_decisions||[], factorKeys);
+
+  // 12. Return map for date list coloring
   const returnMap = new Map();
   dailyReturns.forEach((r,i) => returnMap.set(dailyValues[i+1]?.date, r));
 
@@ -353,6 +374,7 @@ function processData(raw) {
     dailyValues, dailyReturns, portNorm, sharpe, maxDD, winRate,
     txHistory, buys, sells, totalComm, totalBuy, turnover,
     snapshots, allFunds, fundNames, decMap, factorMatrix, returnMap,
+    factorKeys,
     raw
   };
 }
@@ -399,7 +421,7 @@ function buildFundNames(ads) {
   return m;
 }
 
-function buildFactorMatrix(ads) {
+function buildFactorMatrix(ads, factorKeys) {
   const dates = ads.map(d => d.date);
   const fundsSet = new Set();
   ads.forEach(ad => {
@@ -407,7 +429,7 @@ function buildFactorMatrix(ads) {
   });
   const funds = [...fundsSet].sort();
   const result = { dates, funds };
-  for (const fk of FACTOR_KEYS) {
+  for (const fk of factorKeys) {
     result[fk] = {};
     for (const fund of funds) {
       result[fk][fund] = ads.map(ad =>
@@ -532,8 +554,31 @@ function renderCurve() {
     hoverinfo:'skip'
   });
 
-  // Fund benchmarks
+  // Equal-weight ETF benchmark: average normalised value across all ETFs in fund_performance
   const fp = p.raw.fund_performance||{};
+  const allSeries = Object.values(fp);
+  if (allSeries.length > 0) {
+    const dateSet = new Set();
+    allSeries.forEach(s => s.forEach(v => dateSet.add(v.date)));
+    const sortedDates = [...dateSet].sort();
+    const normMaps = allSeries.map(s => {
+      const iv = s[0]?.value || 1;
+      const m = new Map(); s.forEach(v => m.set(v.date, v.value / iv)); return m;
+    });
+    const ewX = [], ewY = [];
+    for (const d of sortedDates) {
+      const vals = normMaps.map(m => m.get(d)).filter(v => v !== undefined);
+      if (vals.length) { ewX.push(d); ewY.push(vals.reduce((a,b)=>a+b,0)/vals.length); }
+    }
+    if (ewX.length) traces.push({
+      x: ewX, y: ewY,
+      type:'scatter', mode:'lines', name:'⚖️ 等权ETF基准',
+      line:{color:'#e3a008', width:1.5, dash:'dashdot'}, opacity:.85,
+      hovertemplate:'等权ETF基准<br>%{x}: %{y:.4f}<extra></extra>'
+    });
+  }
+
+  // Individual fund overlays (toggled by checkboxes)
   for (const fund of activeFunds) {
     const series = fp[fund]; if (!series) continue;
     // Normalize to start at 1.0
@@ -581,7 +626,7 @@ function renderCurve() {
 
   Plotly.react('ch-curve', traces, {
     ...LAYOUT_BASE,
-    xaxis:{...LAYOUT_BASE.xaxis, type:'category', title:'日期', tickangle:-45},
+    xaxis:{...LAYOUT_BASE.xaxis, type:'date', title:'日期', tickangle:-45},
     yaxis:{...LAYOUT_BASE.yaxis, title:'归一化净值', tickformat:'.4f'},
     hovermode:'closest'
   }, CFG);
@@ -630,7 +675,8 @@ function renderHoldings() {
 // ════════════════════════════════
 function renderDecisionList() {
   const p = PROC;
-  const dates = [...p.decMap.keys()].sort();
+  // Use all portfolio dates so days without an agent decision (e.g. final day) still appear
+  const dates = p.dailyValues.map(v => v.date);
   if (!dates.length) {
     document.getElementById('date-list').innerHTML = '<div class="empty" style="padding:20px;font-size:12px">无决策数据</div>';
     return;
@@ -639,7 +685,8 @@ function renderDecisionList() {
     const ret = p.returnMap.get(date);
     const retStr = ret !== undefined ? pct(ret) : '—';
     const cls = ret === undefined ? '' : ret >= 0 ? 'pos' : 'neg';
-    return `<div class="d-item" id="di-${date}" onclick="selectDate('${date}')">
+    const hasDec = p.decMap.has(date);
+    return `<div class="d-item${hasDec ? '' : ' no-dec'}" id="di-${date}" onclick="selectDate('${date}')">
       <span class="d-date">${date}</span>
       <span class="d-ret ${cls}">${retStr}</span>
     </div>`;
@@ -655,7 +702,17 @@ function selectDate(date) {
 }
 
 function renderDecisionDetail(date) {
-  const ad = PROC.decMap.get(date); if (!ad) return;
+  const ad = PROC.decMap.get(date);
+  if (!ad) {
+    const dv = PROC.dailyValues.find(v => v.date === date);
+    document.getElementById('dec-detail').innerHTML =
+      `<div class="empty" style="padding:30px;font-size:13px">
+        <div style="font-size:15px;margin-bottom:8px">${date}</div>
+        <div style="color:#8b949e">当日无 Agent 决策记录</div>
+        ${dv ? `<div style="margin-top:12px;color:#c9d1d9">组合净值：<span style="font-family:monospace">${(dv.value/((PROC.raw.portfolio_value_history||[])[0]?.value||1)).toFixed(4)}</span></div>` : ''}
+      </div>`;
+    return;
+  }
   const core   = getCore(ad);
   const trades = core.trades || [];
   const results= ad.trade_results || [];
@@ -750,7 +807,7 @@ function renderDecFactors(date) {
     return;
   }
 
-  const factors = FACTOR_KEYS.filter(k => funds.some(f => snap[f]?.factors?.[k] !== undefined));
+  const factors = PROC.factorKeys.filter(k => funds.some(f => snap[f]?.factors?.[k] !== undefined));
   const z = funds.map(fund => factors.map(f => snap[fund]?.factors?.[f] ?? null));
   const zTxt = z.map(row => row.map(v => v !== null ? v.toFixed(2) : ''));
 
@@ -816,7 +873,7 @@ function renderFactorHeatmap() {
       [0,'#b91c1c'],[0.4,'#7f1d1d'],[0.5,'#161b22'],[0.6,'#14532d'],[1,'#16a34a']
     ],
     zmid:0, showscale:true,
-    hovertemplate:'%{y}<br>%{x}<br>'+FACTOR_LABELS[factor]+': %{z:.3f}<extra></extra>'
+    hovertemplate:'%{y}<br>%{x}<br>'+(FACTOR_LABELS[factor]||factor)+': %{z:.3f}<extra></extra>'
   }], {
     ...LAYOUT_BASE,
     margin:{l:100,r:80,t:20,b:80},

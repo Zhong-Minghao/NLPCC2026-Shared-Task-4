@@ -152,7 +152,8 @@ class ViewGenerationAgent:
             historical_prices: Historical price data
             current_portfolio: Current portfolio holdings
             fund_pool: List of available fund IDs
-            market_data: Additional market data (optional)
+            market_data: Additional market data (optional). May contain
+                         "historical_principles" dict from MemoryBank.
 
         Returns:
             List of View objects
@@ -170,16 +171,43 @@ class ViewGenerationAgent:
 
         capital = current_portfolio.get("capital", 0)
 
-        # Format prompt
-        prompt = self.prompt_template.format(
-            funds_text=funds_text,
-            date_to_decision=date_to_decision,
-            capital=capital,
-            holdings_text=holdings_text,
-            sentiment_summary=sentiment_summary,
-            sentiment_details=sentiment_details,
-            history_text=history_text,
+        # Retrieve memory-bank principles if provided
+        historical_principles = (market_data or {}).get("historical_principles", {})
+        historical_principles_text = self._build_principles_text(historical_principles)
+
+        # Build rolling sentiment text (from augmented sentiment_analysis if available)
+        rolling_sentiment_text = self._build_rolling_sentiment_text(
+            rolling_scores=sentiment_analysis.get("rolling_scores"),
+            trend_directions=sentiment_analysis.get("trend_directions"),
+            anchored_returns=sentiment_analysis.get("anchored_returns"),
+            fund_pool=fund_pool,
         )
+
+        # Format prompt
+        try:
+            prompt = self.prompt_template.format(
+                funds_text=funds_text,
+                date_to_decision=date_to_decision,
+                capital=capital,
+                holdings_text=holdings_text,
+                sentiment_summary=sentiment_summary,
+                sentiment_details=sentiment_details,
+                history_text=history_text,
+                historical_principles_text=historical_principles_text,
+                rolling_sentiment_text=rolling_sentiment_text,
+            )
+        except KeyError:
+            # Fallback for prompt templates that don't have {rolling_sentiment_text}
+            prompt = self.prompt_template.format(
+                funds_text=funds_text,
+                date_to_decision=date_to_decision,
+                capital=capital,
+                holdings_text=holdings_text,
+                sentiment_summary=sentiment_summary,
+                sentiment_details=sentiment_details,
+                history_text=history_text,
+                historical_principles_text=historical_principles_text,
+            )
 
         # Call LLM
         try:
@@ -288,6 +316,64 @@ class ViewGenerationAgent:
             price = details.get("price", 0)
             lines.append(f"- {fund_id}: 持仓价值 {value:.2f} 元 (当前价: {price:.2f})")
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_rolling_sentiment_text(
+        rolling_scores: Optional[Dict],
+        trend_directions: Optional[Dict],
+        anchored_returns: Optional[Dict],
+        fund_pool: List[str],
+    ) -> str:
+        """Build rolling sentiment context text for the view generation prompt."""
+        if not rolling_scores or not trend_directions:
+            return "（暂无滚动舆情数据，本次仅基于当日新闻判断）"
+
+        lines = []
+        for fund_id in fund_pool:
+            score = rolling_scores.get(fund_id, 0.0)
+            direction = trend_directions.get(fund_id, "neutral")
+            anchored = (anchored_returns or {}).get(fund_id, 0.0)
+
+            score_str = f"{score:+.2f}"
+            anchored_str = f"{anchored:+.2%}/天"
+
+            info = FUND_INFO.get(fund_id, {})
+            name = info.get("name", fund_id)
+
+            if direction == "neutral":
+                constraint = "不作方向约束"
+            else:
+                constraint = f"锚定预期收益={anchored_str}"
+
+            lines.append(
+                f"- {fund_id} ({name}): 10d趋势={score_str} [{direction}] | {constraint}"
+            )
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_principles_text(historical_principles: Dict) -> str:
+        """Format memory-bank principles for prompt injection."""
+        if not historical_principles:
+            return "（暂无历史经验记录）"
+
+        lines = []
+        for key, principles in historical_principles.items():
+            if not principles:
+                continue
+            lines.append(f"[{key}]")
+            for p in principles:
+                if hasattr(p, "principle"):
+                    # SectorPrinciple object
+                    lines.append(
+                        f"  · {p.principle} (可信度{p.confidence:.2f}, 依据{p.evidence_count}条)"
+                    )
+                elif isinstance(p, dict):
+                    lines.append(
+                        f"  · {p.get('principle', '')} "
+                        f"(可信度{p.get('confidence', 0):.2f}, 依据{p.get('evidence_count', 0)}条)"
+                    )
+        return "\n".join(lines) if lines else "（暂无历史经验记录）"
 
     def _build_history_text(self, historical_prices: Dict, fund_pool: List[str]) -> str:
         """Build historical price summary text."""

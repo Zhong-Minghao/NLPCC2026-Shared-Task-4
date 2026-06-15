@@ -235,6 +235,7 @@ class BlackLittermanModel:
         risk_aversion: float = 3.0,
         lookback_days: int = 60,
         omega_method: str = "confidence",
+        market_weight_method: str = "equal_weight",
     ):
         """
         Args:
@@ -244,6 +245,9 @@ class BlackLittermanModel:
             omega_method: Method for calculating uncertainty matrix Ω
                 - "confidence": Based on view confidence levels
                 - "proportional": Proportional to prior covariance
+            market_weight_method: Prior equilibrium weight method
+                - "equal_weight": Equal weights (default)
+                - "inverse_vol": Inverse volatility (risk parity prior)
         """
         self.tau = tau
         self.risk_aversion = risk_aversion
@@ -251,7 +255,10 @@ class BlackLittermanModel:
         self.omega_method = omega_method
 
         self.cov_estimator = CovarianceEstimator(lookback_days=lookback_days)
-        self.market_prior = MarketPrior(risk_aversion=risk_aversion)
+        self.market_prior = MarketPrior(
+            risk_aversion=risk_aversion,
+            market_weight_method=market_weight_method,
+        )
 
     def calculate_omega(
         self,
@@ -494,6 +501,7 @@ class PortfolioOptimizer:
         optimization_method: str = "max_sharpe",
         min_weight: float = 0.0,
         max_weight: float = 0.4,
+        market_weight_method: str = "equal_weight",
     ):
         """
         Args:
@@ -504,11 +512,13 @@ class PortfolioOptimizer:
             optimization_method: "max_sharpe" or "min_variance"
             min_weight: Minimum weight constraint
             max_weight: Maximum weight constraint
+            market_weight_method: Prior equilibrium weight method ("equal_weight" or "inverse_vol")
         """
         self.bl_model = BlackLittermanModel(
             tau=tau,
             risk_aversion=risk_aversion,
             lookback_days=lookback_days,
+            market_weight_method=market_weight_method,
         )
         self.risk_free_rate = risk_free_rate
         self.optimization_method = optimization_method
