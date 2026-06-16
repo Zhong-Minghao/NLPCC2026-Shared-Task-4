@@ -82,6 +82,9 @@ class BlackLittermanAgent:
         view_flip_return_threshold: float = 0.01,
         base_magnitude: float = 0.015,
         asymmetric_factor: float = 0.50,
+        # Turnover reduction parameters
+        turnover_penalty: float = 0.0,
+        enable_view_persistence: bool = True,
     ):
         """
         Args:
@@ -113,6 +116,8 @@ class BlackLittermanAgent:
             view_flip_return_threshold: LLM expected_return must exceed this to override rolling direction
             base_magnitude: rolling_score=1.0 maps to this daily expected return
             asymmetric_factor: Same-direction alpha reduction factor
+            turnover_penalty: L1 penalty coefficient λ on weight changes vs prev period (0=off)
+            enable_view_persistence: Inject yesterday's views into prompt for LLM consistency
         """
         self.agent_id = agent_id
         self.model_name = view_model_name
@@ -173,6 +178,12 @@ class BlackLittermanAgent:
         self._rolling_base_magnitude = base_magnitude
         self._rolling_asymmetric_factor = asymmetric_factor
         self.rolling_tracker: Optional[RollingSentimentTracker] = None
+
+        # Turnover reduction
+        self.turnover_penalty = turnover_penalty
+        self.enable_view_persistence = enable_view_persistence
+        self.prev_target_weights: Dict[str, float] = {}
+        self.prev_views: Dict[str, Dict] = {}  # {fund_id: {expected_return, confidence, date}}
 
         # Track history
         self.decision_history: List[Dict] = []
@@ -267,6 +278,14 @@ class BlackLittermanAgent:
         else:
             augmented_sentiment = sentiment_analysis
 
+        # Step 2.8: Inject yesterday's views for LLM consistency (view persistence)
+        if self.enable_view_persistence and self.prev_views:
+            if market_data is None:
+                market_data = {}
+            market_data = dict(market_data)
+            market_data["previous_views"] = self.prev_views
+            logger.info(f"  注入昨日观点 {len(self.prev_views)} 条（观点持久化）")
+
         # Step 3: Generate views
         logger.info("💭 生成投资观点...")
         views = await self.view_agent.generate_views(
@@ -303,6 +322,8 @@ class BlackLittermanAgent:
                 historical_prices=historical_prices,
                 views=[v.to_dict() for v in views],
                 fund_pool=fund_pool,
+                prev_weights=self.prev_target_weights if self.prev_target_weights else None,
+                turnover_penalty=self.turnover_penalty,
             )
 
             target_weights = optimization_result.weights
@@ -377,6 +398,17 @@ class BlackLittermanAgent:
         self._record_decision(
             date_to_decision, views, optimization_result, final_decision
         )
+
+        # Update persistent state for next day's decision
+        self.prev_target_weights = dict(target_weights)
+        self.prev_views = {
+            v.fund_id: {
+                "expected_return": v.expected_return,
+                "confidence": v.confidence,
+                "date": date_to_decision,
+            }
+            for v in views
+        }
 
         logger.info(f"✅ 决策完成: {len(final_trades)} 个指令")
 

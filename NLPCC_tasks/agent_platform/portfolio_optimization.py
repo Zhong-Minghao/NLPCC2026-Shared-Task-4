@@ -360,6 +360,8 @@ class BlackLittermanModel:
         method: str = "max_sharpe",
         min_weight: float = 0.0,
         max_weight: float = 0.4,
+        prev_weights: Optional[np.ndarray] = None,
+        turnover_penalty: float = 0.0,
     ) -> np.ndarray:
         """
         Calculate optimal portfolio weights.
@@ -373,6 +375,8 @@ class BlackLittermanModel:
                 - "min_variance": Minimize portfolio variance
             min_weight: Minimum weight for any asset
             max_weight: Maximum weight for any asset
+            prev_weights: Previous period weights for turnover penalty (n x 1)
+            turnover_penalty: L1 turnover penalty coefficient λ (0 = disabled)
 
         Returns:
             Optimal weights (n x 1)
@@ -381,7 +385,8 @@ class BlackLittermanModel:
 
         if method == "max_sharpe":
             return self._maximize_sharpe_ratio(
-                posterior_returns, cov_matrix, risk_free_rate, min_weight, max_weight
+                posterior_returns, cov_matrix, risk_free_rate, min_weight, max_weight,
+                prev_weights=prev_weights, turnover_penalty=turnover_penalty,
             )
         elif method == "min_variance":
             return self._minimize_variance(
@@ -398,11 +403,13 @@ class BlackLittermanModel:
         risk_free_rate: float,
         min_weight: float,
         max_weight: float,
+        prev_weights: Optional[np.ndarray] = None,
+        turnover_penalty: float = 0.0,
     ) -> np.ndarray:
         """
-        Maximize Sharpe ratio using numerical optimization.
+        Maximize Sharpe ratio with optional L1 turnover penalty.
 
-        Max: (w^T μ - rf) / sqrt(w^T Σ w)
+        Max: (w^T μ - rf) / sqrt(w^T Σ w) - λ * ||w - w_prev||_1
         Subject to: sum(w) = 1, min_weight <= w_i <= max_weight
         """
         from scipy.optimize import minimize
@@ -412,14 +419,22 @@ class BlackLittermanModel:
         # Daily risk-free rate (assuming 252 trading days)
         daily_rf = risk_free_rate / 252
 
+        _apply_penalty = (
+            prev_weights is not None
+            and turnover_penalty > 0
+            and len(prev_weights) == n
+        )
+
         def objective(weights):
-            """Negative Sharpe ratio (to minimize)"""
             portfolio_return = weights @ expected_returns
             portfolio_var = weights @ cov_matrix @ weights
             portfolio_std = np.sqrt(portfolio_var)
             if portfolio_std < 1e-10:
                 return -1e10  # Large negative for near-zero variance
             sharpe = (portfolio_return - daily_rf) / portfolio_std
+            if _apply_penalty:
+                turnover = np.sum(np.abs(weights - prev_weights))
+                return -sharpe + turnover_penalty * turnover
             return -sharpe
 
         # Constraints
@@ -430,8 +445,8 @@ class BlackLittermanModel:
         # Bounds
         bounds = [(min_weight, max_weight) for _ in range(n)]
 
-        # Initial guess: equal weights
-        x0 = np.ones(n) / n
+        # Warm-start from previous weights when available, else equal weights
+        x0 = prev_weights.copy() if _apply_penalty else np.ones(n) / n
 
         # Optimize
         result = minimize(
@@ -530,6 +545,8 @@ class PortfolioOptimizer:
         historical_prices: Dict[str, List[Dict]],
         views: List[Dict],
         fund_pool: List[str],
+        prev_weights: Optional[Dict[str, float]] = None,
+        turnover_penalty: float = 0.0,
     ) -> OptimizationResult:
         """
         Optimize portfolio using Black-Litterman model.
@@ -543,6 +560,8 @@ class PortfolioOptimizer:
                 - confidence: float (0-1)
                 - benchmark_fund_id: str (for relative views)
             fund_pool: List of fund IDs
+            prev_weights: Previous period target weights {fund_id: weight} for turnover penalty
+            turnover_penalty: L1 penalty coefficient λ on weight changes (0 = disabled)
 
         Returns:
             OptimizationResult with weights and metrics
@@ -557,6 +576,11 @@ class PortfolioOptimizer:
         prior_returns = self.bl_model.market_prior.calculate_equilibrium_returns(
             cov_matrix, valid_funds=valid_funds, historical_prices=historical_prices
         )
+
+        # Align prev_weights dict to valid_funds order as numpy array
+        prev_weights_arr: Optional[np.ndarray] = None
+        if prev_weights and turnover_penalty > 0:
+            prev_weights_arr = np.array([prev_weights.get(f, 1.0 / n) for f in valid_funds])
 
         # Step 3: Convert views to matrices
         P, Q, confidences = self._views_to_matrices(views, valid_funds)
@@ -583,7 +607,7 @@ class PortfolioOptimizer:
                 confidences,
             )
 
-            # Step 5: Calculate optimal weights
+            # Step 5: Calculate optimal weights (with optional turnover penalty)
             weights = self.bl_model.calculate_optimal_weights(
                 posterior_returns,
                 cov_matrix,
@@ -591,6 +615,8 @@ class PortfolioOptimizer:
                 method=self.optimization_method,
                 min_weight=self.min_weight,
                 max_weight=self.max_weight,
+                prev_weights=prev_weights_arr,
+                turnover_penalty=turnover_penalty,
             )
 
         # Calculate metrics

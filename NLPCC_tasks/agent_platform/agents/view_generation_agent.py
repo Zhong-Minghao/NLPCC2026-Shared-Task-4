@@ -183,6 +183,10 @@ class ViewGenerationAgent:
             fund_pool=fund_pool,
         )
 
+        # Build previous views text for LLM consistency (view persistence)
+        previous_views = (market_data or {}).get("previous_views", {})
+        previous_views_text = self._build_previous_views_text(previous_views)
+
         # Format prompt
         try:
             prompt = self.prompt_template.format(
@@ -195,19 +199,33 @@ class ViewGenerationAgent:
                 history_text=history_text,
                 historical_principles_text=historical_principles_text,
                 rolling_sentiment_text=rolling_sentiment_text,
+                previous_views_text=previous_views_text,
             )
         except KeyError:
-            # Fallback for prompt templates that don't have {rolling_sentiment_text}
-            prompt = self.prompt_template.format(
-                funds_text=funds_text,
-                date_to_decision=date_to_decision,
-                capital=capital,
-                holdings_text=holdings_text,
-                sentiment_summary=sentiment_summary,
-                sentiment_details=sentiment_details,
-                history_text=history_text,
-                historical_principles_text=historical_principles_text,
-            )
+            # Fallback for prompt templates that don't have all placeholders
+            try:
+                prompt = self.prompt_template.format(
+                    funds_text=funds_text,
+                    date_to_decision=date_to_decision,
+                    capital=capital,
+                    holdings_text=holdings_text,
+                    sentiment_summary=sentiment_summary,
+                    sentiment_details=sentiment_details,
+                    history_text=history_text,
+                    historical_principles_text=historical_principles_text,
+                    rolling_sentiment_text=rolling_sentiment_text,
+                )
+            except KeyError:
+                prompt = self.prompt_template.format(
+                    funds_text=funds_text,
+                    date_to_decision=date_to_decision,
+                    capital=capital,
+                    holdings_text=holdings_text,
+                    sentiment_summary=sentiment_summary,
+                    sentiment_details=sentiment_details,
+                    history_text=history_text,
+                    historical_principles_text=historical_principles_text,
+                )
 
         # Call LLM
         try:
@@ -349,6 +367,21 @@ class ViewGenerationAgent:
                 f"- {fund_id} ({name}): 10d趋势={score_str} [{direction}] | {constraint}"
             )
 
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_previous_views_text(previous_views: Dict) -> str:
+        """Format yesterday's views for LLM consistency prompt injection."""
+        if not previous_views:
+            return "（无昨日观点记录）"
+        lines = []
+        for fund_id, info in previous_views.items():
+            er = info.get("expected_return", 0)
+            conf = info.get("confidence", 0)
+            direction = "看多" if er > 0 else "看空"
+            lines.append(
+                f"- {fund_id}: 预期{er:.2%}, 置信度{conf:.2f} [{direction}]"
+            )
         return "\n".join(lines)
 
     @staticmethod
